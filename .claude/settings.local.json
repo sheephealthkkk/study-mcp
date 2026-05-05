@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d C:/Users/bkjysheep/Desktop/mcp/**)",
+      "Bash(python -m py_compile server.py)",
+      "Bash(python -m py_compile client.py)",
+      "Bash(python -m py_compile \"C:\\\\Users\\\\bkjysheep\\\\Desktop\\\\mcp\\\\study-mcp\\\\server.py\")",
+      "Bash(python -m py_compile \"C:\\\\Users\\\\bkjysheep\\\\Desktop\\\\mcp\\\\study-mcp\\\\client.py\")",
+      "Bash(python -m py_compile \"C:\\\\Users\\\\bkjysheep\\\\Desktop\\\\mcp\\\\study-mcp\\\\mcp_server.py\")",
+      "Bash(python -m py_compile \"C:\\\\Users\\\\bkjysheep\\\\Desktop\\\\mcp\\\\study-mcp\\\\mcp_client.py\")",
+      "Bash(python -m py_compile \"C:\\\\Users\\\\bkjysheep\\\\Desktop\\\\mcp\\\\study-mcp\\\\fc_demo.py\")",
+      "Bash(python \"C:\\\\Users\\\\bkjysheep\\\\Desktop\\\\mcp\\\\study-mcp\\\\mcp_client.py\")",
+      "Bash(python:*)",
+      "Bash(printf '北京今天天气怎么样\\\\nquit\\\\n')"
+    ]
+  }
+}
