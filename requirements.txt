@@ -1,4 +1,0 @@
-# MCP Demo 仅使用 Python 标准库，无需额外安装依赖
-# 如果你要接入真实的 LLM，可能需要：
-# anthropic==0.50.0
-# openai==1.80.0
