@@ -1,15 +1,21 @@
 # 第三模块：MCP Server/Client 开发入门
 
-> **学习周期**：4-5 天  
-> **学习目标**：能独立使用 Python SDK 或 TypeScript SDK 构建一个可运行的 MCP Server 和 Client
+> **学习周期**：5-6 天  
+> **学习目标**：能独立使用 Python SDK 或 TypeScript SDK 构建一个可运行的 MCP Server 和
+> Client。掌握全局错误处理、健壮 Client 设计、Mock 测试方案和 Go SDK 的基本使用。
 
 ---
 
 ## 目录
 
 1. [一、是什么——MCP SDK 体系概览](#一是什么mcp-sdk-体系概览)
+   - [1.1 SDK 全景图（含 Go SDK 实战）](#11-sdk-全景图)
+   - [1.4 跨语言 SDK 行为差异与迁移注意事项](#14-跨语言-sdk-行为差异与迁移注意事项)
 2. [二、为什么需要——SDK 解决了哪些开发痛点](#二为什么需要sdk-解决了哪些开发痛点)
 3. [三、如何实现——从零构建 MCP Server 和 Client](#三如何实现从零构建-mcp-server-和-client)
+   - [3.3.5 全局错误处理中间件](#335-全局错误处理中间件)
+   - [3.5.2 构建健壮的 MCP Client](#352-构建健壮的-mcp-client)
+   - [3.7.5 使用 Mock Transport 进行轻量级测试](#375-使用-mock-transport-进行轻量级测试)
 4. [四、底层原理——SDK 内部机制剖析](#四底层原理sdk-内部机制剖析)
 5. [五、企业级最佳实践](#五企业级最佳实践)
 6. [六、常见面试题](#六常见面试题)
@@ -47,14 +53,92 @@ MCP SDK 生态系统
 │                                                          │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │
 │  │ Kotlin   │ │   Go     │ │   C#     │ │  Rust    │   │
-│  │ (model-  │ │ (mark3    │ │ (model-  │ │ (model-  │   │
+│  │ (model-  │ │ (mark3   │ │ (model-  │ │ (model-  │   │
 │  │ context- │ │ labs/mcp-│ │ context- │ │ context- │   │
 │  │ protocol │ │ go)      │ │ protocol │ │ protocol │   │
-│  │ /kotlin- │ │          │ │ /csharp- │ │ /rust-sdk│   │
-│  │ sdk)     │ │          │ │ sdk)     │ │ )        │   │
+│  │ /kotlin- │ │ ★ 1k+   │ │ /csharp- │ │ /rust-sdk│   │
+│  │ sdk)     │ │ stars    │ │ sdk)     │ │ )        │   │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘   │
 └──────────────────────────────────────────────────────────┘
 ```
+
+Go SDK 值得重点关注——大量企业后端使用 Go 技术栈，面试中可能被问及。以下是 `mark3labs/mcp-go` 的最小可运行 Server 示例：
+
+```go
+// main.go —— Go MCP Server 最小可运行示例
+// 依赖: go get github.com/mark3labs/mcp-go
+package main
+
+import (
+    "context"
+    "fmt"
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+    // 1. 创建 Server
+    s := server.NewMCPServer(
+        "go-weather-server", "1.0.0",
+        server.WithToolCapabilities(true),
+    )
+
+    // 2. 注册工具
+    s.AddTool(
+        mcp.NewTool("get_weather",
+            mcp.WithDescription("获取指定城市的天气信息"),
+            mcp.WithString("city",
+                mcp.Required(),
+                mcp.Description("城市名称，如'北京'"),
+            ),
+        ),
+        func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+            city := request.Params.Arguments["city"].(string)
+            return mcp.NewToolResultText(
+                fmt.Sprintf("%s 的天气：晴，22°C", city),
+            ), nil
+        },
+    )
+
+    // 3. 注册资源
+    s.AddResource(
+        mcp.NewResource("system://status", "系统状态",
+            mcp.WithResourceDescription("当前系统的运行状态"),
+        ),
+        func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+            return []mcp.ResourceContents{
+                mcp.TextResourceContents{
+                    URI:      "system://status",
+                    MIMEType: "application/json",
+                    Text:     `{"status":"healthy","uptime":"72h"}`,
+                },
+            }, nil
+        },
+    )
+
+    // 4. 以 stdio 模式启动
+    if err := server.ServeStdio(s); err != nil {
+        panic(err)
+    }
+}
+```
+
+**面试追问**："公司后端是 Go 技术栈，你会如何用 Go SDK 构建 MCP Server？"
+
+**应对要点**：
+- 首选 `mark3labs/mcp-go`（社区最活跃），编译为单一二进制文件，Docker 镜像 < 10MB
+- 与 Python 的关键差异：Go 需**手写 JSON Schema**（通过 `mcp.WithString()` 等 builder），没有 Python FastMCP 的类型自动推导能力。工具数量 > 10 时建议编写代码生成工具从 Go struct tag 生成 Tool 定义
+- **并发优势**：goroutine 模型天然适合 MCP 并发调用，handler 中检查 `ctx.Done()` 以支持 MCP Cancelled 通知
+- **并发安全**：如多个 tools/call 并发访问共享 map，需加 `sync.Mutex`
+
+**Go vs Python 选型速查**：
+
+| 维度 | Python (FastMCP) | Go (mcp-go) |
+|------|-----------------|-------------|
+| 开发效率 | 高（类型推导 + 装饰器） | 中（手写 Schema） |
+| 部署体积 | ~100MB (Docker) | <10MB (scratch 镜像) |
+| 并发性能 | 中（asyncio） | 高（goroutine） |
+| 适合规模 | 工具数 < 20 | 工具数不限 |
 
 ### 1.2 FastMCP vs Low-Level API
 
@@ -77,6 +161,64 @@ Python SDK 提供了两层 API：
 | ≤ 1.1.x | ≤ 0.x | 2024-11-05 | 初始版本 |
 | 1.2.0 | — | 2024-11-05 | 废弃 `server.run()`，引入 `FastMCP` |
 | 1.3.0 | 1.0.4 | 2025-03-26 | 支持 Streamable HTTP、Elicitation、Progressive Capabilities |
+
+### 1.4 跨语言 SDK 行为差异与迁移注意事项
+
+#### 1.4.1 `server.run()` 废弃后的完整迁移 checklist
+
+MCP Python SDK 1.2.0 起废弃了老式的 `server.run()`，必须迁移到 `FastMCP`：
+
+```
+□ Step 1: 检查 SDK 版本
+    pip show mcp | grep Version
+    如果 < 1.2.0 → pip install mcp>=1.3.0
+
+□ Step 2: 替换 Server 创建
+    [旧] from mcp.server import Server
+         server = Server("my-server")
+         @server.list_tools() ...; @server.call_tool() ...
+         server.run()
+
+    [新] from mcp.server.fastmcp import FastMCP
+         mcp = FastMCP("my-server")
+         @mcp.tool() ...    # 一个装饰器替代 list_tools + call_tool
+         mcp.run(transport="stdio")
+
+□ Step 3: 替换 Resource 注册
+    [旧] @server.list_resources() + @server.read_resource()
+    [新] @mcp.resource("uri://path")   # 一个装饰器同时处理 list + read
+
+□ Step 4: 明确传输方式
+    [旧] server.run() → 默认 stdio
+    [新] mcp.run(transport="stdio")    # 显式指定，防止误用
+
+□ Step 5: 能力声明自动化
+    [旧] 手动在 Server 构造函数中声明 capabilities
+    [新] FastMCP 从装饰器自动推断——注册了 @mcp.tool() 即自动声明 tools 能力
+
+□ Step 6: 验证
+    python server.py
+    npx @anthropic-ai/mcp-inspector python server.py
+```
+
+#### 1.4.2 Python SDK vs TypeScript SDK 关键行为差异
+
+| 行为 | Python SDK (FastMCP) | TypeScript SDK | 面试要点 |
+|------|---------------------|---------------|----------|
+| **工具定义** | 装饰器 + 类型注解**自动推导** JSON Schema | `server.registerTool()` + **手写 Zod** Schema | Python 开发效率高 2-3x |
+| **错误返回** | `result.isError = True` | 同，但 **TS 类型更严格**（编译期检查） | Python 依赖运行时校验 |
+| **Resource 返回** | 返回 `str` → SDK **自动包装**为协议格式 | 需**显式返回** `{contents: [...]}` | TS 更接近协议原始结构 |
+| **Transport 切换** | `mcp.run(transport="sse")` 一行切换 | 需手动创建 `SSEServerTransport` 实例 | Python 抽象层级更高 |
+| **并发模型** | `asyncio` 协程 | Node.js Event Loop | 性能模型不同但都能满足需求 |
+| **部署体积** | ~100MB（含依赖） | ~50MB（node_modules） | Go 编译单二进制 < 10MB |
+
+**面试追问**："Python 和 TypeScript SDK 你更推荐哪个？"
+
+**参考回答**：取决于团队背景和场景。数据/AI 团队推荐 Python FastMCP（类型推导 + 少写代码），前端/全栈团队推荐 TypeScript（编译期安全 + 浏览器 Client）。对于工具数 > 50 的大项目，TS 的类型安全价值更大。混合方案（Python Server + TS Client）也很常见。
+
+#### 1.4.3 Go SDK 的定位
+
+Go 社区 SDK 适合以下场景：公司后端是 Go + 需要高并发 + 希望单二进制部署 + 微服务架构。相对于 Python 和 TypeScript，Go SDK 的劣势是工具定义的样板代码更多（需手写 JSON Schema），优势是部署简单和并发性能更好。
 
 ---
 
@@ -486,6 +628,140 @@ def send_notification(
   在工具函数内部 catch 并返回有意义的错误信息
 ```
 
+#### 3.3.5 全局错误处理中间件
+
+工具函数的未捕获异常会变成 JSON-RPC `-32603 Internal Error`——LLM 收到的是冷冰冰的技术错误，无法有效决策。以下方案覆盖了从异常拦截到 LLM 友好响应的完整链路。
+
+**面向 LLM 的异常类体系：**
+
+```python
+# error_middleware.py —— MCP 全局错误处理中间件
+import functools
+import traceback
+import logging
+import uuid
+import json
+from typing import Callable
+
+logger = logging.getLogger(__name__)
+
+
+class LLMFriendlyError(Exception):
+    """面向 LLM 的友好异常——与普通 Exception 的区别在于包含 recovery_hint"""
+
+    def __init__(self, message: str, recovery_hint: str = "DO_NOT_RETRY"):
+        self.message = message
+        self.recovery_hint = recovery_hint  # RETRY | RETRY_WITH_FIX | RETRY_LATER | DO_NOT_RETRY
+        super().__init__(message)
+
+# 预定义友好异常类型
+class NotFoundError(LLMFriendlyError):
+    def __init__(self, resource: str, suggestion: str = ""):
+        super().__init__(
+            f"未找到 {resource}。{suggestion}",
+            "RETRY_WITH_FIX"
+        )
+
+class ExternalServiceError(LLMFriendlyError):
+    def __init__(self, service: str, detail: str = ""):
+        super().__init__(
+            f"{service} 服务暂时不可用{': ' + detail if detail else ''}。建议稍后重试。",
+            "RETRY_LATER"
+        )
+
+class ParamError(LLMFriendlyError):
+    def __init__(self, field: str, reason: str):
+        super().__init__(
+            f"参数 '{field}' 不正确：{reason}。请修正后重试。",
+            "RETRY_WITH_FIX"
+        )
+
+
+def mcp_error_handler(func: Callable) -> Callable:
+    """全局错误处理装饰器——三层处理"""
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs) -> str:
+        try:
+            return await func(*args, **kwargs)
+        except LLMFriendlyError as e:
+            logger.warning(f"[友好异常] {func.__name__}: {e.message}")
+            return json.dumps({
+                "success": False,
+                "error": {"message": e.message, "recovery": e.recovery_hint}
+            }, ensure_ascii=False)
+        except ValueError as e:
+            logger.warning(f"[参数错误] {func.__name__}: {e}")
+            return json.dumps({
+                "success": False,
+                "error": {"message": f"参数错误：{e}。请检查参数格式和取值范围。", "recovery": "RETRY_WITH_FIX"}
+            }, ensure_ascii=False)
+        except Exception as e:
+            error_id = uuid.uuid4().hex[:8]
+            logger.error(f"[内部错误] error_id={error_id} {func.__name__}: {e}\n{traceback.format_exc()}")
+            return json.dumps({
+                "success": False,
+                "error": {
+                    "message": f"内部处理错误（ID: {error_id}）。请稍后重试，如持续请提供此 ID 给管理员。",
+                    "recovery": "DO_NOT_RETRY",
+                    "error_id": error_id
+                }
+            }, ensure_ascii=False)
+    return wrapper
+```
+
+**使用示例**：
+
+```python
+@mcp.tool()
+@mcp_error_handler
+async def search_employees(query: str) -> str:
+    if len(query) < 2:
+        raise ParamError("query", "至少 2 个字符")
+    try:
+        results = await db.search(query)
+    except ConnectionError:
+        raise ExternalServiceError("数据库")
+    if not results:
+        raise NotFoundError(f"员工 '{query}'", "尝试只搜姓氏或用邮箱搜索")
+    return json.dumps({"success": True, "data": results})
+```
+
+**面向 LLM 的错误消息原则——正反例对比：**
+
+```python
+# ❌ 面向开发者的错误——LLM 无法利用
+"ERROR: SQLSTATE[HY000] Connection refused to 10.0.1.5:5432"
+"IndexError: list index out of range at employee_service.py:147"
+
+# ✅ 面向 LLM 的友好错误——LLM 能理解并决策
+"数据库暂时不可用，建议稍后重试。如持续请提供错误 ID: a1b2c3d4"
+"未找到匹配的员工 '张三'。建议：1) 只搜姓氏 2) 按邮箱搜索"
+```
+
+**设计规则速查**：
+
+| 规则 | 说明 |
+|------|------|
+| **自然语言** | 用自然语言描述，不使用错误码（如 `ECONNREFUSED`） |
+| **给出下一步** | recovery_hint 告诉 LLM：`RETRY` / `RETRY_WITH_FIX` / `DO_NOT_RETRY` |
+| **提供替代方案** | 给出具体的回退建议或多路径选择 |
+| **脱敏** | 内部错误只暴露 error_id（可追溯），不暴露堆栈/SQL/IP |
+
+**isError: true vs JSON-RPC error 的决策树：**
+
+```
+发生异常
+    │
+    ├── 异常发生在 MCP 协议层？（JSON 格式错误 / Method Not Found / Invalid Params）
+    │   └── YES → JSON-RPC Error（重试无法修复，需人工介入）
+    │
+    └── 异常发生在工具业务逻辑？（查不到数据 / 外部服务超时 / 参数语义错误）
+        └── YES → result.isError: true（LLM 可根据错误信息调整策略）
+
+经验法则：如果连"请求是否到达了正确的工具函数"都不确定 → JSON-RPC Error
+          如果工具正确执行但业务上失败 → result.isError: true
+```
+
 ### 3.4 Resource 的暴露方式
 
 #### 3.4.1 静态资源
@@ -654,6 +930,111 @@ async def main():
 
 asyncio.run(main())
 ```
+
+#### 3.5.2 构建健壮的 MCP Client
+
+基础 Client 覆盖了 happy path，生产环境需要处理重连、超时、并发和缓存四个维度。
+
+**维度一：重连策略（指数退避 + 自动恢复）**
+
+```python
+# robust_client.py —— 生产级 MCP Client
+import asyncio
+import logging
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+logger = logging.getLogger(__name__)
+
+class RobustMCPClient:
+    """自动重连 + 缓存恢复的健壮 Client"""
+
+    def __init__(self, server_params: StdioServerParameters, max_retries: int = 10):
+        self.server_params = server_params
+        self.max_retries = max_retries
+        self._session: ClientSession | None = None
+        self._tool_cache: list | None = None
+        self._read = self._write = None
+
+    async def connect(self):
+        for attempt in range(self.max_retries):
+            try:
+                self._read, self._write = await stdio_client(
+                    self.server_params
+                ).__aenter__()
+                self._session = ClientSession(self._read, self._write)
+                await self._session.initialize()
+                # 恢复工具缓存
+                tools = await self._session.list_tools()
+                self._tool_cache = tools.tools
+                logger.info(f"连接成功 (attempt {attempt + 1})")
+                return
+            except Exception as e:
+                logger.warning(f"连接失败 (attempt {attempt + 1}): {e}")
+                if attempt < self.max_retries - 1:
+                    delay = min(1.0 * (2 ** attempt), 30.0)  # 指数退避, max 30s
+                    await asyncio.sleep(delay)
+                else:
+                    raise ConnectionError(f"重连 {self.max_retries} 次后仍失败") from e
+
+    async def call_tool(self, name: str, arguments: dict):
+        """带重连重试的工具调用"""
+        for attempt in range(2):
+            try:
+                return await self._session.call_tool(name, arguments)
+            except (ConnectionError, OSError) as e:
+                if attempt == 0:
+                    logger.warning(f"调用失败，尝试重连: {e}")
+                    await self.connect()
+                else:
+                    raise
+```
+
+**维度二：超时处理（分传输方式推荐值）**
+
+| 传输方式 | connect | initialize | tool_call | 原则 |
+|----------|---------|-----------|-----------|------|
+| **stdio** | 10s | 5s | 30s | 本地进程，超时最短 |
+| **SSE** | 15s | 10s | 60s | 跨网络 + 2 Channel，适当放宽 |
+| **Streamable HTTP** | 10s | 10s | 60s | 建议在 tool_call 内再细分 HTTP 请求超时 30s |
+
+设计原则：connect 应快速失败（避免 LLM 长时间等待），tool_call 超时应**明显小于** LLM 请求总超时（确保 LLM 能收到错误并做出决策）。
+
+**维度三：并发调用管理**
+
+MCP Client **可以**同时发起多个 tools/call——每个请求有独立 `id`，JSON-RPC 通过 `id` 匹配响应。但需注意：
+- **stdio**：串行处理（单线程读 stdout），并发请求**可能导致响应乱序**
+- **Streamable HTTP**：每个请求走独立 HTTP 连接，天然支持并发
+- **需要并发能力时优先选 Streamable HTTP**
+
+```python
+class ConcurrencyManager:
+    """工具调用并发控制"""
+    def __init__(self, max_global: int = 10, tool_limits: dict[str, int] = None):
+        self._global = asyncio.Semaphore(max_global)
+        self._per_tool: dict[str, asyncio.Semaphore] = {}
+        self._limits = tool_limits or {}  # 例: {"deploy": 1, "search_db": 20}
+
+    async def acquire(self, tool_name: str):
+        await self._global.acquire()
+        limit = self._limits.get(tool_name, 5)
+        sem = self._per_tool.setdefault(tool_name, asyncio.Semaphore(limit))
+        await sem.acquire()
+
+    def release(self, tool_name: str):
+        self._global.release()
+        self._per_tool.get(tool_name) and self._per_tool[tool_name].release()
+```
+
+**维度四：Client 端缓存策略**
+
+| 缓存对象 | 策略 | 失效条件 |
+|----------|------|----------|
+| `tools/list` | **无 TTL**——永久有效直到收到通知 | `notifications/tools/list_changed` |
+| `resources/list` | **无 TTL**——同 tools | `notifications/resources/list_changed` |
+| `resources/read` | **TTL 60s**——内容可能变化 | TTL 过期 或 `notifications/resources/updated` |
+
+> **关键认知**：`tools/list` 和 `resources/list` 的缓存**不应有时间 TTL**——它们是事件敏感的而非时间敏感的。Server 声明 `listChanged: false` 时，Client 可以整个 session 永久缓存。这是 MCP 相比 Function Calling（每次对话都携带 Schema）的 Token 节省核心来源。
 
 ### 3.6 TypeScript SDK 等价实现
 
@@ -967,6 +1348,166 @@ def safe_tool(param: str) -> str:
         logging.exception("未预期的错误")
         return f"内部错误: {type(e).__name__}"
 ```
+
+#### 3.7.5 使用 Mock Transport 进行轻量级测试
+
+启动真实 Server 进程的集成测试成本高（进程启动开销、依赖外部环境）。Mock Transport 通过内存队列模拟通信，实现毫秒级单元测试。
+
+**Mock Transport 实现：**
+
+```python
+# tests/mock_transport.py
+import asyncio
+import json
+
+class MockTransport:
+    """内存队列模拟 MCP Transport——不启动真实进程
+
+    核心原理：
+    - Client 的 write() → 消息入 _client_requests 队列（测试验证用）
+    - 测试代码 write() → 消息入 _server_responses 队列（模拟 Server 响应）
+    - 100% 在内存中运行，毫秒级完成
+    """
+
+    def __init__(self):
+        self._client_requests: asyncio.Queue = asyncio.Queue()   # Client 发出的请求
+        self._server_responses: asyncio.Queue = asyncio.Queue()  # 测试注入的响应
+
+    async def read(self):
+        return await self._server_responses.get()
+
+    async def write(self, message: dict):
+        await self._client_requests.put(message)
+
+    # ---- 测试辅助方法 ----
+    async def get_client_request(self, timeout: float = 1.0) -> dict:
+        """获取 Client 发送的请求，供测试断言"""
+        return await asyncio.wait_for(self._client_requests.get(), timeout=timeout)
+
+    async def send_response(self, response: dict):
+        """向 Client 注入响应"""
+        await self._server_responses.put(response)
+
+    async def simulate_initialize(self):
+        """模拟完整的 initialize 握手"""
+        init_req = await self.get_client_request()
+        assert init_req["method"] == "initialize"
+        await self.send_response({
+            "jsonrpc": "2.0", "id": init_req["id"],
+            "result": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {
+                    "tools": {"listChanged": True},
+                    "resources": {"subscribe": True}
+                },
+                "serverInfo": {"name": "mock", "version": "1.0.0"}
+            }
+        })
+        notif = await self.get_client_request()
+        assert notif["method"] == "notifications/initialized"
+
+    async def simulate_tool_response(self, request_id, text: str, is_error=False):
+        await self.send_response({
+            "jsonrpc": "2.0", "id": request_id,
+            "result": {"content": [{"type": "text", "text": text}], "isError": is_error}
+        })
+
+    async def simulate_error(self, error_msg: str = "模拟错误"):
+        await self.send_response({"jsonrpc": "2.0", "error": {"code": -32603, "message": error_msg}})
+```
+
+**五个典型测试场景：**
+
+```python
+# tests/test_with_mock.py
+import pytest
+import asyncio
+import json
+from mcp import ClientSession
+from .mock_transport import MockTransport
+
+
+@pytest.fixture
+async def mock_session():
+    transport = MockTransport()
+    session = ClientSession(transport, transport)
+    await asyncio.gather(session.initialize(), transport.simulate_initialize())
+    yield session, transport
+
+
+@pytest.mark.asyncio
+async def test_normal_tool_call(mock_session):
+    """测试 1：正常工具调用——验证参数传递和结果返回"""
+    session, transport = mock_session
+    call_task = asyncio.create_task(
+        session.call_tool("get_weather", {"city": "北京"})
+    )
+    req = await transport.get_client_request()
+    assert req["method"] == "tools/call"
+    assert req["params"]["arguments"] == {"city": "北京"}
+    await transport.simulate_tool_response(req["id"], "北京：晴，22°C")
+    result = await call_task
+    assert result.content[0].text == "北京：晴，22°C"
+    assert result.isError is False
+
+
+@pytest.mark.asyncio
+async def test_business_error(mock_session):
+    """测试 2：业务错误——isError: true 而非 JSON-RPC Error"""
+    session, transport = mock_session
+    call_task = asyncio.create_task(
+        session.call_tool("get_weather", {"city": "X"})
+    )
+    req = await transport.get_client_request()
+    await transport.simulate_tool_response(req["id"], "未找到该城市", is_error=True)
+    result = await call_task
+    assert result.isError is True
+
+
+@pytest.mark.asyncio
+async def test_tool_list_cache(mock_session):
+    """测试 3：缓存逻辑——验证二次调用不发送请求"""
+    session, transport = mock_session
+    # 第一次调用 → 应发送 tools/list
+    t1 = asyncio.create_task(session.list_tools())
+    r1 = await transport.get_client_request()
+    await transport.simulate_tool_response(r1["id"], json.dumps({"tools": [{"name": "t1"}]}))
+    await t1
+    # 验证队列为空（没有额外请求）
+    assert transport._client_requests.empty()
+
+
+@pytest.mark.asyncio
+async def test_connection_error(mock_session):
+    """测试 4：连接断开——Client 应抛出异常"""
+    session, transport = mock_session
+    call_task = asyncio.create_task(session.call_tool("x", {}))
+    await transport.get_client_request()
+    await transport.simulate_error("模拟网络断开")
+    with pytest.raises(Exception):
+        await call_task
+
+
+@pytest.mark.asyncio
+async def test_timeout(mock_session):
+    """测试 5：超时——Client 应有超时保护"""
+    session, transport = mock_session
+    call_task = asyncio.create_task(
+        asyncio.wait_for(session.call_tool("slow", {}), timeout=0.1)
+    )
+    await transport.get_client_request()
+    # 不发送响应 → 等待超时
+    with pytest.raises(asyncio.TimeoutError):
+        await call_task
+```
+
+**三层测试策略速查**：
+
+| 测试类型 | 耗时 | 覆盖场景 |
+|----------|------|----------|
+| Mock Transport | **毫秒级** | 参数传递、返回格式、错误处理、缓存逻辑、超时/断开 |
+| stdio 集成测试 | 秒级 | 进程生命周期、版本协商、端到端功能 |
+| 远程集成测试 | 秒级（含网络） | 网络延迟、TLS、认证、Streamable HTTP |
 
 ---
 
@@ -1543,7 +2084,27 @@ mcp.run(transport="streamable-http")   # 生产环境
 
 ---
 
-**Q7: 如果你要设计一个有 50 个工具的 MCP Server，你会如何组织代码？**
+### Go SDK 与跨语言
+
+**Q7: 公司后端是 Go 技术栈，你会如何用 Go SDK 构建 MCP Server？与 Python 有什么不同？**
+
+<details>
+<summary>参考答案</summary>
+
+首选社区最活跃的 `mark3labs/mcp-go`。
+
+**与 Python FastMCP 的关键差异**：
+
+1. **Schema 手写成本**：Go 没有装饰器 + 类型推导，每个参数需手写 `mcp.WithString()` / `mcp.WithNumber()` / `mcp.Required()` / `mcp.Description()`。工具数 > 10 时建议写代码生成工具
+2. **并发模型**：Go goroutine 天然适合 MCP 并发调用，handler 中需检查 `ctx.Done()` 以支持 Cancelled 通知。注意共享状态的 `sync.Mutex` 保护
+3. **部署优势**：编译为单一二进制文件，Docker scratch 镜像 < 10MB（Python 约 100MB+）
+4. **选型建议**：小型 Server（< 10 工具）推荐 Python FastMCP（开发效率高），大型 Server / 微服务 / 高并发推荐 Go（性能和部署优势）
+
+</details>
+
+---
+
+**Q8: 如果你要设计一个有 50 个工具的 MCP Server，你会如何组织代码？**
 
 <details>
 <summary>参考答案</summary>
@@ -1571,6 +2132,24 @@ src/my_server/
 3. 为高频工具写好 docstring（影响 LLM 选择准确率）
 4. 使用 `destructiveHint` 标记写操作工具
 5. 统一错误处理中间件/装饰器
+
+</details>
+
+---
+
+**Q9: 一个生产级 MCP Client 需要处理哪些健壮性问题？具体如何实现？**
+
+<details>
+<summary>参考答案</summary>
+
+四个核心维度：
+
+1. **重连策略**：指数退避（1s→2s→4s→...→max 30s），最大重试 10 次。重连成功后自动 re-initialize + 恢复缓存
+2. **超时处理**：分操作类型（connect: 10-15s / tool_call: 30-60s）和分传输方式（stdio < SSE < Streamable HTTP）设置。tool_call 超时应明显小于 LLM 请求总超时
+3. **并发控制**：Streamable HTTP 天然支持（独立 HTTP 连接），stdio 串行。按工具做差异化限流（deploy: 1串行, search_db: 20高并发）
+4. **Client 缓存**：`tools/list` 无 TTL（事件驱动失效，收到 `tools/list_changed` 才刷新）；`resources/read` TTL 60s。缓存是 MCP 相比 Function Calling 在 Token 节省上的核心优势
+
+**加分点**：提一句 "stale-while-revalidate" 策略——返回缓存结果的同时异步刷新。
 
 </details>
 

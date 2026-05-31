@@ -1,7 +1,9 @@
 # 第四模块：MCP 全栈项目实战
 
-> **学习周期**：5-7 天  
-> **学习目标**：能从零设计并实现一个完整的 MCP 服务，涵盖 Tools、Resources、Prompts 三大原语，对接真实数据库和 API
+> **学习周期**：7-9 天  
+> **学习目标**：能从零设计并实现一个完整的 MCP 服务，涵盖 Tools、Resources、
+> Prompts 三大原语，对接真实数据库和 API。掌握多业务场景的工具设计模式、
+> 跨 Server 事务策略、性能基准测试和生产级部署方案。
 
 ---
 
@@ -10,6 +12,9 @@
 1. [一、是什么——全栈 MCP 项目的完整图景](#一是什么全栈-mcp-项目的完整图景)
 2. [二、为什么需要——从 Demo 到生产的鸿沟](#二为什么需要从-demo-到生产的鸿沟)
 3. [三、如何实现——全栈 MCP 项目实战](#三如何实现全栈-mcp-项目实战)
+   - [3.10 不同业务领域的工具设计模式](#310-不同业务领域的工具设计模式)
+   - [3.11 跨 Server 事务场景的设计策略](#311-跨-server-事务场景的设计策略)
+   - [3.12 性能基准测试](#312-性能基准测试)
 4. [四、底层原理——复合工具与多 Server 协作机制](#四底层原理复合工具与多-server-协作机制)
 5. [五、企业级最佳实践](#五企业级最佳实践)
 6. [六、常见面试题](#六常见面试题)
@@ -1243,79 +1248,325 @@ def _weekly_report_prompt(department: str) -> str:
 请基于实际数据撰写，不要编造信息。如果数据不足，请明确标注。"""
 ```
 
-### 3.9 Docker 部署
+### 3.9 生产级部署
+
+#### 3.9.1 多阶段 Docker 构建 + Secrets 管理
 
 ```dockerfile
-# Dockerfile
-FROM python:3.12-slim
-
+# Dockerfile.prod —— 多阶段构建 + 非 root 运行
+FROM python:3.12-slim AS builder
 WORKDIR /app
+RUN pip install --no-cache-dir poetry
+COPY pyproject.toml poetry.lock ./
+RUN poetry config virtualenvs.create false \
+    && poetry install --no-dev --no-interaction --no-ansi
 
-# 安装系统依赖（asyncpg 需要）
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# 安装 Python 依赖
-COPY pyproject.toml .
-RUN pip install --no-cache-dir mcp==1.3.0 asyncpg httpx pydantic
-
-# 复制应用代码
+FROM python:3.12-slim AS runtime
+RUN groupadd -r mcp && useradd -r -g mcp -d /app mcp
+WORKDIR /app
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY src/ src/
-
-# MCP Server 通过 stdio 通信，不需要暴露端口
-# 如果使用 Streamable HTTP，则需要 EXPOSE 端口
-EXPOSE 8000
-
-# 默认使用 stdio
-CMD ["python", "-m", "ops_assistant.server"]
-
-# Streamable HTTP 模式使用：
-# CMD ["python", "-c", "from ops_assistant.server import mcp; mcp.run(transport='streamable-http', port=8000)"]
+COPY prompts/ prompts/
+USER mcp
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+EXPOSE 8000 9090
+CMD ["python", "-c", "from ops_assistant.server import mcp; mcp.run(transport='streamable-http', host='0.0.0.0', port=8000)"]
 ```
 
+#### 3.9.2 Docker Compose（生产配置 + Secrets + Fluentd 日志收集）
+
 ```yaml
-# docker-compose.yml
+# docker-compose.prod.yml
 version: "3.8"
 services:
-  ops-assistant:
-    build: .
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: ops-assistant:${VERSION:-latest}
     environment:
       - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_NAME=ops_db
-      - DB_USER=ops_user
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DEPLOY_API_URL=${DEPLOY_API_URL}
-      - API_KEY=${API_KEY}
-      - ALLOWED_PATHS=/var/log
-      - LOG_LEVEL=INFO
-    stdin_open: true  # stdio 传输需要
-    tty: true         # stdio 传输需要
-    volumes:
-      - /var/log:/var/log:ro  # 只读挂载日志目录
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD_FILE=/run/secrets/db_password
+      - API_KEY_FILE=/run/secrets/api_key
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=json
+      - PROMETHEUS_PORT=9090
+    secrets: [db_password, api_key]
+    ports: ["8000:8000", "9090:9090"]
+    deploy:
+      resources:
+        limits: { memory: 512M, cpus: "1.0" }
+        reservations: { memory: 256M, cpus: "0.5" }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s; timeout: 3s; retries: 3; start_period: 10s
     restart: unless-stopped
+    logging:
+      driver: "fluentd"
+      options: { fluentd-address: localhost:24224, tag: mcp.server }
 
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ops_db
-      POSTGRES_USER: ops_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ops_user -d ops_db"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s; timeout: 3s; retries: 5
 
+secrets:
+  db_password: { file: ./secrets/db_password.txt }
+  api_key: { file: ./secrets/api_key.txt }
 volumes:
   pgdata:
+```
+
+#### 3.9.3 多环境配置 + Prometheus 指标 + 结构化日志
+
+```
+配置分层：config/{base,dev,staging,prod}.py  |  切换：export APP_ENV=prod
+生产默认：JSON 日志 + DB_POOL_MIN=5, POOL_MAX=10 + 审计启用 + Fluentd 日志收集
+```
+
+```python
+# ops_assistant/utils/metrics.py
+from prometheus_client import Counter, Histogram, Gauge
+
+tool_call_total = Counter("mcp_tool_call_total", "工具调用总次数", ["tool_name", "status"])
+tool_call_duration = Histogram("mcp_tool_call_duration_seconds", "工具调用耗时", ["tool_name"],
+    buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10])
+db_pool_available = Gauge("mcp_db_pool_available", "连接池可用连接数")
+```
+
+```yaml
+# prometheus/alerts.yml
+groups:
+  - name: mcp_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: rate(mcp_tool_call_total{status="error"}[5m]) / rate(mcp_tool_call_total[5m]) > 0.1
+        for: 5m; labels: { severity: P1 }
+      - alert: HighP99Latency
+        expr: histogram_quantile(0.99, rate(mcp_tool_call_duration_seconds_bucket[5m])) > 5
+        for: 5m; labels: { severity: P2 }
+      - alert: PoolExhausted
+        expr: mcp_db_pool_available < 1
+        for: 2m; labels: { severity: P1 }
+```
+
+### 3.10 不同业务领域的工具设计模式
+
+"运维助手"是单一场景。面试中可能要求你当场为电商/金融/办公场景设计工具列表。以下展示同一原则在不同约束下的展开。
+
+#### 3.10.1 电商——高并发 + 库存一致性
+
+```python
+@mcp.tool()
+async def place_order(user_id: str, items: list[dict], address_id: str) -> dict:
+    """下单——内部编排：校验库存 → 锁定优惠券 → 创建订单。
+    三步在单个工具内完成，LLM 的两次 tools/call 之间没有事务保证。"""
+    ...
+
+@mcp.tool()
+async def search_products(query: str, category: str = None,
+    sort_by: str = "relevance", page_size: int = 20) -> dict:
+    """搜索——一次返回商品+价格+库存+评分+优惠（搜索是最高并发路径）"""
+    ...
+```
+
+#### 3.10.2 金融——审计追踪 + 数据脱敏
+
+```python
+@mcp.tool()
+@audit_log("COMPLIANCE_CHECK")     # 强制审计，Server 端保证
+async def compliance_check(transaction_id: str) -> dict: ...
+
+@mcp.tool()
+async def assess_risk(customer_id: str, amount: float) -> dict:
+    raw = await risk_engine.evaluate(customer_id, amount)
+    return desensitize(raw, fields=["name", "id_number", "phone", "bank_account"])
+
+@mcp.resource("fin://accounts/{id}/transactions")
+async def get_transactions(account_id: str) -> str:
+    """Resource 而非 Tool——只读+可缓存+支持订阅。风险评估是计算（Tool），交易记录是数据（Resource）"""
+```
+
+#### 3.10.3 办公——跨系统权限收敛
+
+```python
+@mcp.tool()
+async def search_across_systems(query: str) -> dict:
+    """跨系统搜索——Server 内部 asyncio.gather 并发请求各子系统。
+    LLM 一次调用了解信息分布，无需感知多系统架构。"""
+    tasks = [search_mail(query), search_docs(query), search_calendar(query)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    return aggregate_results(query, results)
+```
+
+#### 3.10.4 三场景对比
+
+| 维度 | 运维 | 电商 | 金融 | 办公 |
+|------|------|------|------|------|
+| 核心约束 | 数据源多样 | 高并发+一致性 | 审计+脱敏 | 跨系统权限 |
+| 复合策略 | 聚合多数据源 | 事务内编排 | 审计内嵌 | 跨系统聚合 |
+| Resource用法 | 日志/配置 | 商品详情(缓存) | 交易记录(只读) | 文档内容 |
+| 安全要求 | 路径白名单 | 幂等Key防重 | 字段级脱敏 | OAuth代理 |
+
+> **统一铁律**：一个工具 = 一个用户意图，而非一个 API 端点。
+
+### 3.11 跨 Server 事务场景的设计策略
+
+MCP 协议不提供分布式事务支持。核心原则：**不要让 LLM 成为分布式事务协调器**。
+
+#### 3.11.1 策略一：避免跨 Server（首选——单工具内编排）
+
+```python
+@mcp.tool()
+async def place_order(user_id, items, address_id):
+    order = None
+    try:
+        order = await order_db.create(user_id, items, status="pending")
+        result = await inventory_client.deduct(items)  # 内部 gRPC/HTTP
+        if not result.success:
+            await order_db.update(order.id, status="cancelled", reason=result.reason)
+            return make_error("INSUFFICIENT_STOCK", result.reason, "RETRY_LATER")
+        await order_db.update(order.id, status="confirmed")
+        return make_success(order.to_dict())
+    except Exception as e:
+        if order: await order_db.update(order.id, status="cancelled")
+        return make_error("ORDER_FAILED", str(e), "DO_NOT_RETRY")
+```
+
+#### 3.11.2 策略二：补偿事务（跨 2 个 Server 的兜底方案）
+
+补偿四原则：①正向可撤销 ②补偿幂等 ③补偿不依赖外部故障资源 ④定时兜底（不 100% 依赖 LLM 执行补偿）。
+
+```python
+@mcp.tool()
+async def create_order(user_id, items):          # 正向工具
+    """创建 pending 订单——30 分钟未确认自动取消"""
+    ...
+
+@mcp.tool()
+async def cancel_order(order_id, reason):         # 补偿工具——必须幂等
+    order = await order_db.get(order_id)
+    if order.status == "cancelled":
+        return {"status": "already_cancelled"}    # 幂等响应
+    await order_db.update(order_id, status="cancelled", reason=reason)
+    return {"status": "cancelled"}
+
+@mcp.tool()
+async def expire_stale_orders():                  # 定时任务兜底
+    expired = await order_db.expire_pending_orders()
+    return {"expired_count": len(expired)}
+```
+
+#### 3.11.3 策略三：Saga 编排（3+ 个 Server）
+
+```
+Step 1: Order → create_order(pending)
+Step 2: Inventory → deduct  (失败→Order cancel_order)
+Step 3: Payment → charge    (失败→Inventory restore + Order cancel)
+Step 4: 全部成功 → 三方 confirm
+
+Saga 协调器内嵌在 place_order 工具中，LLM 始终只看到一次调用。
+```
+
+#### 3.11.4 决策树
+
+```
+跨 Server 调用必须？
+  ├── NO → 策略一：单工具内编排（最优）
+  └── YES → 2 个 Server → 策略二：补偿事务
+            └── 3+ 个 → 策略三：Saga 编排
+```
+
+### 3.12 性能基准测试
+
+面试追问："你的复合工具比薄封装快多少？有数据吗？"
+
+#### 3.12.1 复合工具 vs 薄封装
+
+```
+场景：查询"技术部成员及其最近提交"
+
+  成员数   薄封装调用次数   薄封装 mean    复合 mean    加速比
+  ──────  ─────────────   ───────────    ────────    ──────
+  10 人    12 次            380ms         45ms         8.4x [E]
+  50 人    52 次           1,850ms        52ms        35.6x [E]
+  200 人  202 次           7,400ms        65ms       113.8x [E]
+
+  [E] stdio RTT ≈ 0.8ms/次, DB 查询 ≈ 15-30ms/次
+  薄封装 = RTT×N + DB×N。复合 = RTT×1 + DB×1 (JOIN)。
+  加速比随成员数线性增长，复合工具延迟几乎恒定。
+```
+
+#### 3.12.2 不同数据量查询延迟
+
+```
+  返回记录数   Mean    P99     建议
+  ──────────  ──────  ──────   ──────────
+  100         12ms    22ms    正常
+  1,000       35ms    58ms    正常
+  10,000     180ms   320ms   建议分页（瓶颈：JSON 序列化）
+  100,000    850ms   1,500ms 必须分页/摘要
+```
+
+#### 3.12.3 连接池调优
+
+```
+并发 20 client:
+  min=1,max=2  → mean 85ms, P99 420ms, 错误率 2.1%  [E]
+  min=5,max=10 → mean 28ms, P99 85ms,  错误率 0.05% [E] ← 推荐
+  推荐：pool_min = 并发数 × 0.3, pool_max = 并发数
+```
+
+#### 3.12.4 压测脚本
+
+```python
+import asyncio, time, statistics
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+class ToolBenchmark:
+    def __init__(self, cmd=["python", "-m", "ops_assistant.server"]):
+        self.params = StdioServerParameters(command=cmd[0], args=cmd[1:])
+
+    async def _session(self):
+        r, w = await stdio_client(self.params).__aenter__()
+        s = ClientSession(r, w); await s.initialize(); return s
+
+    async def compare(self, dept, members, iters=50):
+        s = await self._session()
+        comp = []; thin = []
+        for _ in range(iters):
+            t0 = time.perf_counter()
+            await s.call_tool("get_department_overview", {"department_name": dept})
+            comp.append((time.perf_counter()-t0)*1000)
+        for _ in range(iters):
+            t0 = time.perf_counter(); s2 = await self._session()
+            await s2.call_tool("get_department_id", {"name": dept})
+            await s2.call_tool("list_employees", {"dept_id": 5})
+            for i in range(members):
+                await s2.call_tool("get_employee_commits", {"employee_id": i+1})
+            thin.append((time.perf_counter()-t0)*1000)
+        return {"speedup": statistics.mean(thin)/statistics.mean(comp)}
+
+if __name__ == "__main__":
+    async def main():
+        b = ToolBenchmark()
+        for n in [10, 50, 200]:
+            r = await b.compare("技术部", n, 30)
+            print(f"成员={n}: 加速比={r['speedup']:.1f}x")
+    asyncio.run(main())
 ```
 
 ---
@@ -1806,6 +2057,50 @@ def get_department_overview(dept_name: str): ...
 
 ---
 
+**Q9: 如果 LLM 调用 Server A 的 `create_order` 成功，但 Server B 的 `deduct_inventory` 失败，如何保证数据一致性？**
+
+<details>
+<summary>参考答案</summary>
+
+MCP 协议不提供分布式事务支持。核心原则：**不要让 LLM 成为分布式事务协调器**。
+
+三种策略按优先级递进：
+1. **首选：避免跨 Server（单工具内编排）**——将两步合并为一个 `place_order` 工具，事务由 Server 代码保证。LLM 始终只调一个工具。这是成本最低、一致性最强的方案
+2. **兜底：补偿事务（跨 2 个 Server）**——`create_order` 创建 pending 状态订单（30 分钟自动过期），`cancel_order` 作为补偿工具（必须幂等——多次取消返回相同结果）。加定时任务 `expire_stale_orders` 兜底，不 100% 依赖 LLM 执行补偿
+3. **扩展：Saga（3+ 个 Server）**——每步独立 + 对应补偿 + 协调器内嵌在工具中。LLM 始终只看到一次调用和最终结果
+
+</details>
+
+---
+
+**Q10: 为电商/金融/办公场景分别设计 MCP 工具列表，你的设计思路是什么？**
+
+<details>
+<summary>参考答案</summary>
+
+三个场景遵循统一铁律（一个工具 = 一个用户意图），但约束条件不同导致工具设计展开方式不同：
+
+- **电商（高并发 + 一致性）**：搜索工具一次返回全部决策信息（价格+库存+评分+优惠，避免 N+1）；`place_order` 内部编排事务。关注幂等 Key 防重。典型工具数 20-35
+- **金融（审计 + 脱敏）**：每个写操作内嵌 `@audit_log`（Server 端保证，不与 LLM 耦合）；返回数据自动脱敏（姓名→张**）；只读数据用 Resource 暴露（可缓存）；合规检查用独立 Tool（审计调用记录）。典型工具数 25-40
+- **办公（跨系统权限）**：`search_across_systems` 内部 `asyncio.gather` 并发请求各子系统；Server 做 OAuth 代理，LLM 不感知多系统认证。典型工具数 15-20
+
+**加分点**：能主动对比 Resource vs Tool 的选择标准——计算（Tool）vs 数据（Resource）。
+
+</details>
+
+---
+
+**Q11: 你的 MCP Server 的生产部署方案是什么样的？**
+
+<details>
+<summary>参考答案</summary>
+
+五要素：Docker 多阶段构建（非 root 运行）、Docker Secrets 管理敏感信息（`*_FILE` 环境变量读取路径）、JSON 结构化日志 → Fluentd → ELK、Prometheus Counter/Histogram/Gauge + 告警规则（错误率>10%=P1，P99>5s=P2）、GitHub Actions CI/CD（PR 触发 lint+test+security，Tag 触发 build+push 到 ghcr.io）。推荐连接池 `pool_min=并发数×0.3, pool_max=并发数`。
+
+</details>
+
+---
+
 ## 附录
 
 ### 项目初始化脚本
@@ -1881,3 +2176,74 @@ echo "  pip install -e '.[dev]'"
 - [Building Production MCP Servers](https://modelcontextprotocol.io/docs/server-development/production)
 - [asyncpg 文档](https://magicstack.github.io/asyncpg/current/)
 - [HTTPX 文档](https://www.python-httpx.org/)
+- [Saga 分布式事务模式](https://microservices.io/patterns/data/saga.html)
+
+### GitHub Actions CI/CD 配置
+
+```yaml
+# .github/workflows/ci.yml
+name: MCP Server CI/CD
+
+on:
+  push: { branches: [main, develop] }
+  pull_request: { branches: [main] }
+  release: { types: [published] }
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install ruff mypy
+      - run: ruff check src/ tests/
+      - run: mypy src/ --ignore-missing-imports
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_DB: test, POSTGRES_USER: test, POSTGRES_PASSWORD: test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -v --cov=src --cov-report=xml
+        env: { DB_HOST: localhost, DB_USER: test, DB_PASSWORD: test, DB_NAME: test }
+
+  security:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/gh-action-pip-audit@v1
+      - run: pip install bandit && bandit -r src/ -f json -o bandit-report.json
+
+  build-push:
+    if: github.event_name == 'release'
+    needs: [test, security]
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+      - uses: docker/metadata-action@v5
+        id: meta
+        with: { images: ghcr.io/${{ github.repository }}, tags: type=semver,pattern={{version}} }
+      - uses: docker/build-push-action@v5
+        with: { context: ., file: ./Dockerfile.prod, push: true, tags: ${{ steps.meta.outputs.tags }} }
+```
+
+CI/CD 流程：PR → Lint → Test (含 PostgreSQL) → Security Scan → 合并通过。Tag 发布额外触发 → Build + Push Docker 镜像。
