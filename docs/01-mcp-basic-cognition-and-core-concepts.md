@@ -332,6 +332,8 @@ Function Calling 不是 MCP 唯一的参照系。在实际面试和架构选型�
 
 **核心问题**：gRPC 使用 Protocol Buffers 做序列化，性能远超 JSON；gRPC 有强类型 IDL，IDE 支持好。为什么 MCP 不直接用 gRPC？
 
+gRPC 中的 **g** 最初代表 **Google**，因为该框架由 Google 开发并开源；而 **RPC** 是 **Remote Procedure Call**（远程过程调用）的缩写，指允许程序像调用本地函数一样调用远程服务器上功能的通信技术。
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │               MCP (JSON-RPC) vs gRPC 设计哲学对比                 │
@@ -350,6 +352,57 @@ Function Calling 不是 MCP 唯一的参照系。在实际面试和架构选型�
 │  生态兼容性     极高 (LSP 验证)         中 (后端微服务主流)        │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### 1Fetch（准确拼写）
+
+- **是什么**：现代浏览器提供的一个 **Web API**，用于在 JavaScript 中发起网络请求（例如获取数据、提交表单等）。
+- **特点**：基于 **Promise**，语法比传统的 `XMLHttpRequest` 更简洁、灵活。常用于替代 AJAX。
+- **示例**：`fetch('https://api.example.com/data') .then(response => response.json()) .then(data => console.log(data));`
+
+### 2. SSE（Server-Sent Events）
+
+- **是什么**：一种允许服务器 **主动向客户端推送数据** 的技术。客户端通过 HTTP 建立一个长连接，服务器可以持续发送事件流（文本数据）。
+- **特点**：
+  - 单向通信：服务器 → 浏览器。
+  - 基于 HTTP（比 WebSocket 更简单，自动重连）。
+  - 数据格式固定（`text/event-stream`），通常用于实时通知、股票报价、新闻推送等。
+
+**curl** 和 **nc** 都是非常常用的网络命令行工具。
+
+### 1. curl
+- **全称**：Client URL
+- **是什么**：一个功能强大的命令行工具，用于**通过 URL 发送或接收数据**，支持 HTTP、HTTPS、FTP、SFTP、SMTP 等几十种协议。
+- **常见用途**：
+  - 测试 API 接口：`curl https://api.example.com/users`
+  - 下载文件：`curl -O https://example.com/file.zip`
+  - 发送 POST 请求：`curl -X POST -d "name=John" https://example.com/api`
+  - 查看响应头：`curl -I https://google.com`
+- **特点**：几乎每台 Linux/macOS 都有，Windows 10+ 也内置，是调试网络、REST API、gRPC-gateway 等场景的首选工具。
+
+### 2. nc（netcat）
+- **全称**：NetCat（网络瑞士军刀）
+- **是什么**：一个用于**任意 TCP/UDP 网络连接读写**的工具，可以建立监听、发送原始数据、端口扫描、传输文件等。
+- **常见用途**：
+  - **端口测试**：`nc -zv example.com 80`（检查 80 端口是否开放）
+  - **建立聊天/传输**：服务端 `nc -l 1234`，客户端 `nc server_ip 1234`，双方可互发文本
+  - **手动发送 HTTP 请求**：`echo -e "GET / HTTP/1.0\n\n" | nc example.com 80`
+  - **端口转发/代理**：`nc -l 8080 -c "nc backend 80"`
+  - **调试 gRPC 或其他基于 TCP 的服务**：查看原始数据帧（虽然对 HTTP/2 需要更细致解码）
+- **注意**：不同系统下 `nc` 可能有变种（如 `ncat`、`netcat-openbsd`），但核心功能相似。
+
+### 两者对比
+| 工具 | 协议层                       | 典型场景                                     |
+| ---- | ---------------------------- | -------------------------------------------- |
+| curl | 应用层协议（HTTP/FTP等）     | 调用 API、下载网页、测试 REST/gRPC-Web       |
+| nc   | 传输层（TCP/UDP 原始socket） | 端口扫描、手工构造任意协议包、调试网络连通性 |
+
+如果你是在调试 gRPC 服务，**curl** 可以配合 `grpcurl`（专门用于 gRPC 的 curl-like 工具）使用，而 **nc** 通常用于检查端口是否可达或抓取原始字节流。
+
+
+
+
+
+
 
 **为何选择 JSON-RPC 而非 gRPC？——四个关键理由：**
 
@@ -370,7 +423,7 @@ Function Calling 不是 MCP 唯一的参照系。在实际面试和架构选型�
 
 **理由二：工具 Schema 的自描述性优先于类型安全**
 
-MCP 的工具定义需要自描述——LLM 通过读取文本描述来理解工具的用途。JSON 原生支持运行时可见的 `description` 字段，而 Protobuf 的注释在编译后丢失：
+MCP 的工具定义需要自描述——LLM 通过读取文本描述来理解工具的用途。JSON 原生支持运行时可见的 `description` 字段**，而 Protobuf 的注释在编译后丢失：**
 
 ```protobuf
 // gRPC：注释在编译后消失，LLM 无法读取
@@ -403,7 +456,7 @@ gRPC 重度依赖 HTTP/2，在以下 MCP 核心场景中直接不可用：
 |------|------|----------------|
 | stdio 本地进程通信 | ❌ 不支持 | ✅ 原生支持 |
 | 浏览器直接连接 | ❌ 需 grpc-web 代理 | ✅ 原生 fetch / SSE |
-| 云函数 (FaaS) | ❌ 部分支持 | ✅ Streamable HTTP Stateless 模式 |
+| 云函数 (FaaS)Function as a Service，函数即服务 | ❌ 部分支持 | ✅ Streamable HTTP Stateless 模式 |
 | curl 手动调试 | ❌ 不可行 | ✅ 一行命令 |
 
 **理由四：LSP 生态验证了 JSON-RPC 的可行性**
@@ -594,6 +647,7 @@ async def list_tools() -> list[Tool]:
 Tools 是 MCP 中最常用的原语，代表 **LLM 可以执行的操作**。
 
 **核心特征：**
+
 - 模型控制（Model-controlled）：由 LLM 决定何时、以什么参数调用工具
 - 可执行（Executable）：每个工具对应一个真实的函数执行
 - 带 Schema（Structured）：每个工具都有结构化的输入定义（JSON Schema）
