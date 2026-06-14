@@ -175,9 +175,151 @@ Streamable HTTP 是 **2025 年新增的默认传输方式**，它融合了 stdio
 | 模式灵活性 | 仅 Stateful | 支持 Stateless 和 Stateful 两种模式 |
 | 负载均衡友好 | 需要 sticky session | 无状态请求可任意路由 |
 
+
+
+
+
+
+
+为了深入理解它们的差异，我们抛开表面结论，回到协议的底层逻辑，进行一次“从原理到实现，从实现到架构”的深度拆解。
+
+## 💡 核心：Streamable HTTP = 回归标准 + 按需流式
+
+在深入技术细节前，我们先理解本质差异：**SSE是一个有状态的专用推送通道，而Streamable HTTP是基于无状态HTTP的、按需启用的流式响应**。这是两者所有差异的根源。
+
+### 一、清晰界定：SSE和Streamable HTTP到底是什么？
+
+#### 1. SSE是什么？
+
+SSE（Server-Sent Events）是一项:rocket:**有状态**的单向传输技术，允许服务器通过一个持久化的HTTP长连接，向客户端单向推送数据流。在MCP协议的实现中，SSE采用了“双连接”模式：
+- 一个 HTTP 短连接用于客户端发送请求；
+- 一个 SSE 长连接用于服务器推送结果。
+
+这个SSE通道是有状态的，它必须一直保持打开，才能持续接收服务器推送。
+
+#### 2. Streamable HTTP是什么？
+
+Streamable HTTP是MCP协议在2025年3月26日正式引入的传输机制，它并没有发明新协议，而是利用了**标准HTTP的现有能力**（如Transfer-Encoding: chunked），实现了更灵活的通信模式。在最新修订中，工作流得到了进一步简化：
+- **统一端点**：服务器只暴露一个单一的HTTP端点（如 `/mcp`），所有交互都在此完成。
+- **无状态请求**：客户端将每个JSON-RPC请求或通知封装成一个独立的HTTP POST请求进行发送。
+- **按需流式化**：服务器收到请求后，可以选择返回一个普通的JSON对象，也可以选择将响应:rocket:**升级为一个SSE流**，实现流式传输。
+- **内置双向交互**：服务器发起的请求（如提示用户操作）通过 **MRTR（Multi Round-Trip Requests）** 机制，嵌入在响应结果中返回。
+- **利用HTTP基础**：整个传输基于标准HTTP请求-响应模型，天然兼容各类HTTP基础设施。
+
+---
+
+### 二、深入剖析：SSE为什么“不够好”？
+
+SSE的“不够好”，源于其有状态的双连接设计带来的四个核心问题。
+
+#### 1. 单向通信的交互瓶颈
+
+SSE本身是单向推送的，这在MCP的场景下会产生一个僵硬的“命令-推送”裂谷：
+- **用户** (你的程序) 问：`"北京天气如何？"`
+- **服务器** (或工具) 必须在`GET /sse`的长连接上保持等待，并通过独立的HTTP短连接接收命令。
+- **服务器**开始处理：通过SSE流推送一部分结果`"25°C"`，但推送过程中无法接收任何指令（比如需要用户授权）。
+- 如果要进行双向交互，就必须开辟第二个通道（一个额外的HTTP请求），这会破坏流畅的交互体验。
+
+#### 2. 有状态连接的巨大资源消耗:rocket:
+
+SSE的每个连接都需要服务器为其维护状态，这带来了双重的资源负担：
+- **连接数线性增长**：在海量客户端场景下，服务器需要为每个客户端保持一个独立的长连接，这种`O(N)`的连接数增长会迅速耗尽服务器资源。即使是现代浏览器，每个域名下的SSE并发连接数也被限制在6个。
+- **长时间占用**：不仅TCP连接被长期占用，服务器还需为每个连接维护其上下文状态，造成巨大的内存和CPU开销。
+
+#### 3. 薄弱的基础设施兼容性
+
+SSE依赖于“永远在线”的长连接，这与当前主流的、为短连接设计的云基础设施之间存在天然的矛盾：
+- **负载均衡器困境**：大多数负载均衡器对长时间保持的连接支持不佳，可能导致负载不均衡或错误地终止空闲连接。
+- **CDN的“绊脚石”**：CDN主要通过缓存短连接响应来加速，但无法有效缓存或优化SSE这类实时、动态的长连接。
+- **防火墙干扰**：企业防火墙常常会主动断开长时间空闲的连接。
+- **运维复杂性**：部署SSE需要对基础设施进行特殊配置和调优，这增加了运维成本和故障排查的难度。
+
+#### 4. 不佳的高并发性能
+
+基准测试提供了强有力的数据支撑：
+- **连接建立开销**：SSE机制在每次工具调用时，都需要经历TCP握手（约50-100ms）和SSL协商（约100-200ms），导致**端到端延迟增加约120-150ms**。
+- **长连接下的性能恶化**：在有20个并发连接的“持续负载”测试中（60秒，目标RPS=50），SSE虽然在低负载下能保持100%成功率，但随着负载持续，其**平均响应时间已攀升至565ms**，出现了显著的性能恶化。
+
+---
+
+### 三、架构拆解：Streamable HTTP“好在哪里”？
+
+它解决上述问题的核心，就是对标准HTTP请求-响应模型的重构和创造性运用。
+
+#### 1. 机制：回归HTTP请求-响应，实现低延迟
+
+Streamable HTTP 通过回归标准的 HTTP POST 请求-响应模式，大幅降低了每次调用的延迟：
+- **消除连接建立开销**：客户端每次发起请求都是一个标准的HTTP POST，**不需要为每个请求重新建立TCP连接**。在高频请求场景中，操作系统和网络库可以复用底层的TCP连接。
+- **连接复用，而非复用会话**：Streamable HTTP的“连接复用”是指**操作系统的TCP连接复用**。这消除了反复建立新连接的开销，将首次调用的延迟降低了60%以上。延迟数据可以低至**10-30ms**。
+
+#### 2. 机制：按需启用SSE，实现灵活交互
+
+这是Streamable HTTP最精妙的设计，**通过将SSE“降级”为一种可选的响应格式，掌握了何时使用流式响应的控制权**：
+- **SSE作为响应格式，而非传输机制**：当不需要流式传输时，服务器可以直接返回一个标准的JSON响应。
+- **请求发起流式**：流式传输的发起权在“请求”本身，而非一个独立的“通道”。服务器在处理POST请求时，如果结果需要分块返回，就可以将Content-Type设置为`text/event-stream`，将响应升级为SSE流。
+- **请求内的流式会话**：每个独立的POST请求可以对应一个独立的SSE流式会话。这意味着**客户端可以同时发起多个需要流式响应的请求，而它们之间不会相互干扰**。
+
+#### 3. 机制：拥抱无状态架构，实现水平扩展
+
+这是Streamable HTTP实现高吞吐量的基石，它通过拥抱**无状态设计**，让MCP服务器在现代云原生环境中轻松扩展：
+- **服务器无需记忆**：每个HTTP POST请求都携带了服务器处理它所需的所有信息。服务器在处理完一个请求后，不保留任何关于客户端的状态，**这让应用服务器的扩展变得像Web服务器一样简单**。
+- **连接数问题被彻底解决**：客户端连接的“数量”与服务器负载的“规模”不再直接挂钩。真正影响服务器性能的是它每秒能处理的HTTP请求数（RPS），而非有多少个客户端连接。
+- **单连接多路复用**：通过单个TCP连接，可以发送无数个HTTP POST请求，并接收对应的响应，其有效性已在高并发测试中得到验证。标准测试数据显示，Streamable HTTP可实现**290-300 RPS**的吞吐量。
+
+---
+
+### 四、总结：多维对比
+
+| 对比维度           | SSE                                  | Streamable HTTP                                              |
+| :----------------- | :----------------------------------- | :----------------------------------------------------------- |
+| **通信模式**       | 单向（仅服务器推送）                 | 双向（全双工）                                               |
+| **连接模型**       | 双连接（SSE长连 + HTTP短连）         | 单连接按需流式（客户端POST，服务器可选SSE流）                |
+| **交互流程**       | 建立持久通道，被动监听，独立请求     | 发起标准HTTP请求，按需接收流式响应                           |
+| **服务器状态**     | **有状态**（必须维护每个连接的状态） | :rocket:**无状态**（每个请求独立，状态可客户端维护）         |
+| **连接建立延迟**   | 高（约120-150ms）                    | 极低（约10-30ms）                                            |
+| **服务器负载指标** | `O(N)`个连接（N是客户端数）          | `O(RPS)`个请求/秒                                            |
+| **基础设施兼容**   | 差（需特殊配置）                     | 完美（标准HTTP，兼容所有现代组件）                           |
+| **吞吐量与稳定性** | 低负载稳定，高负载恶化（RPS约30）    | 高负载下稳定（RPS约300）                                     |
+| **协议标准化**     | 专用，不完全遵循HTTP标准             | **100%标准HTTP**，利用`Transfer-Encoding`、`Accept`头等标准机制 |
+| **客户端复杂度**   | 较高（需要管理长连接状态、重连逻辑） | **更低**（只需发送POST请求即可）                             |
+
+
+
+总结：一个有状态一个无状态，一个需要长连接，一个可以不用长连接，并且还能复用tcp连接
+
+
+
+为什么无状态更好扩展呢？:rocket:
+
+### 无状态如何做到轻松扩展？
+
+因为**任意一台服务器都可以处理任意一个请求**。
+
+- 请求 1 到达服务器 A，处理完返回。
+- 请求 2 到达服务器 B，处理完返回。
+- 服务器 A 和 B 之间不需要互相知道对方做了什么，也不需要共享任何内存数据。
+
+你只需要在它们前面放一个负载均衡器，把请求随机分发即可。增加新服务器时，无需改动任何现有逻辑。
+
+**比喻**：就像超市的收银台，每个收银员都可以独立为任何顾客结账。客流量大了，多开几个收银台就行，收银员之间不需要互相打电话“你刚才那个顾客买了什么”。
+
+### 3. 有状态为什么难扩展？
+
+因为有状态的服务器必须把“状态”在多个服务器之间同步，否则请求可能会被发到不认识该客户端的服务器上。
+
+以 SSE 为例：
+
+- 客户端与服务器 A 建立了一个 SSE 长连接，服务器 A 记住了这个连接的状态（比如连接 ID、未发送完的数据等）。
+- 如果服务器 A 宕机，或者负载均衡器把客户端的下一个请求发给了服务器 B，服务器 B 根本没有这个连接的状态，无法继续推送数据。
+- 解决方案：要么让所有客户端始终连接到同一台服务器（失去负载均衡的意义），要么在服务器之间同步状态（例如用 Redis 共享会话数据），但这增加了复杂度和延迟。
+
+
+
+
+
 ### 2.2 为什么需要四大核心原语
 
-从第一模块我们知道 MCP 有三种基础原语（Tools / Resources / Prompts），但规范中实际上定义了**四种核心原语**，第四种是 **Sampling（采样）**。
+从第一模块我们知道 MCP 有三种基础原语（Tools / Resources / Prompts），但规范中实际上定义了**四种核心原语**，第四种是 **Sampling（采样）**。:rocket:2025 年初，MCP 官方宣布 **Sampling 原语已废弃**，不再推荐使用。
 
 为什么需要四种而不是一种或十种？这源于对 "LLM 与外部交互" 场景的完整抽象：
 
@@ -211,6 +353,8 @@ LLM 的四种外部交互需求：
 | **Sampling** | Server 请求 | Server → Client → LLM → Client → Server | 反向请求 LLM 生成 |
 
 ---
+
+
 
 ## 三、如何实现——传输机制与原语详解
 
@@ -261,6 +405,60 @@ stdio 传输使用**换行符分帧**（newline-delimited JSON），即每个 JS
 ```
 
 > 注意：JSON 内部不能包含未转义的换行符，否则会破坏分帧。这意味着所有 JSON-RPC 消息必须是单行 JSON，不能 pretty-print。
+
+**Pretty-print**（美化打印）是一种将结构化数据（如 JSON、XML、HTML、代码等）以**人类可读的格式**输出的技术，核心特征包括**缩进、换行、对齐和适当的空格**，使层次结构和内容一目了然。
+
+## 为什么需要 pretty-print？
+
+计算机处理数据时，追求**最小体积和最高效率**，所以原始格式往往是压缩的（无额外空格、换行）。例如：
+
+```json
+{"name":"Alice","age":30,"address":{"city":"Beijing","zip":"100000"},"hobbies":["reading","chess"]}
+```
+
+这种格式机器读起来飞快，但人眼看过去很难立刻找到 `age` 的值或 `hobbies` 的第二项。**Pretty-print 的目标就是为人类调试、查看、编辑提供视觉友好的展示**。
+
+同上例经过 pretty-print 后：
+
+```json
+{
+  "name": "Alice",
+  "age": 30,
+  "address": {
+    "city": "Beijing",
+    "zip": "100000"
+  },
+  "hobbies": [
+    "reading",
+    "chess"
+  ]
+}
+```
+
+一眼就能看出结构层级。
+
+---
+
+## Pretty-print 的核心要素
+
+| 要素              | 说明                                     | 示例                     |
+| ----------------- | ---------------------------------------- | ------------------------ |
+| **缩进**          | 通常使用空格（2或4）或制表符表示嵌套层级 | `␣␣"city":`              |
+| **换行**          | 每个独立元素单独占一行                   | 每对键值对一行           |
+| **对齐**          | 同一层级的元素左对齐                     | 所有键值对的键起始列一致 |
+| **括号/标签配对** | 独立成行或明显标识开始和结束             | `{ ... }` 各占一行       |
+
+---
+
+## Pretty-print 的潜在问题（即“为什么不永远使用 pretty-print”）
+
+1. **体积膨胀**：对于大 JSON（例如 10 MB 数据），添加缩进和换行可能使体积增加 20%~50%，浪费存储和传输带宽。
+2. **敏感信息暴露**：有些数据在压缩时可能利用字符数模糊处理，美化后更容易被肉眼发现。
+3. **日志泛滥**：将超长对象 pretty-print 到日志文件会迅速消耗磁盘空间，且难以用 `grep` 等单行匹配工具搜索。
+
+---
+
+
 
 ### 3.2 SSE 传输实现
 
@@ -769,275 +967,6 @@ async def get_prompt(name: str, arguments: dict) -> GetPromptResult:
         )
 ```
 
-#### 3.4.4 Sampling（采样）—— 反向请求 LLM
-
-**Sampling 是什么：**
-
-Sampling 是四个原语中最特殊的一个——它允许 **Server 主动请求 LLM 生成内容**。这打破了传统的 "Client 请求 → Server 响应" 单向模式。
-
-```
-标准流程：           User → LLM → Client → Server → Client → LLM → User
-
-Sampling 流程：     User → LLM → Client → Server
-                                        │
-                             Server → Client → LLM（LLM 生成内容）
-                                        │
-                             Server ← Client ← LLM
-                                        │
-                             Server → Client → LLM → User
-```
-
-**为什么需要 Sampling？**
-
-| 场景 | 说明 |
-|------|------|
-| **智能摘要** | Server 拿到一大段数据，让 LLM 先做摘要再处理 |
-| **内容生成** | Server 需要让 LLM 生成一些文本用于后续处理 |
-| **多步骤推理** | Server 在中间步骤让 LLM 做一些判断或推理 |
-
-**Sampling 的完整实现：**
-
-```python
-# Server 端 —— 发起 Sampling 请求
-@server.call_tool()
-async def analyze_document(name: str, arguments: dict) -> list[TextContent]:
-    if name == "analyze_long_document":
-        # 1. 获取文档全文
-        doc_text = await fetch_document(arguments["document_id"])
-
-        # 2. 如果文档太长，先让 LLM 做摘要（使用 Sampling）
-        if len(doc_text) > 10000:
-            summary = await server.create_message(
-                messages=[
-                    SamplingMessage(
-                        role="user",
-                        content=TextContent(
-                            type="text",
-                            text=f"请用 300 字以内总结以下文档的核心内容：\n\n{doc_text}"
-                        )
-                    )
-                ],
-                max_tokens=500,
-                temperature=0.3,
-                # 可以指定模型偏好
-                modelPreferences=ModelPreferences(
-                    hints=[ModelHint(name="claude-sonnet-4-6")],
-                    costPriority=0.8,   # 成本权重（0-1）
-                    speedPriority=0.3,  # 速度权重
-                    intelligencePriority=0.9  # 智能程度权重
-                )
-            )
-            # summary 包含 LLM 生成的摘要
-            doc_summary = summary.content
-
-        # 3. 基于摘要做进一步分析
-        # ...
-
-# Client 端 —— 处理 Server 的 Sampling 请求
-class MCPClient:
-    async def _handle_sampling_request(self, request: dict):
-        """Client 收到 Server 的 sampling/createMessage 请求"""
-        messages = request["params"]["messages"]
-        max_tokens = request["params"]["max_tokens"]
-
-        # Client 将请求转发给 LLM
-        llm_response = await self.llm.generate(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=request["params"].get("temperature", 0.7)
-        )
-
-        return {
-            "role": "assistant",
-            "content": TextContent(type="text", text=llm_response),
-            "model": llm_response.model,
-            "stopReason": llm_response.stop_reason
-        }
-```
-
-**Sampling 的安全深度分析：**
-
-Sampling 是四个原语中安全风险最大的——它让外部 Server 间接获得了引导 LLM 行为的能力。以下从三个维度剖析其风险和防护。
-
-##### 维度一：递归 Sampling 攻击
-
-**攻击场景**：Server A 触发 Sampling → LLM 生成的 tool call 指向 Server B → Server B 又触发 Sampling → 形成无终止循环，Token 消耗失控。
-
-```
-递归 Sampling 攻击示意：
-
-  User: "帮我分析这个数据"
-    │
-    ▼
-  Agent → tools/call → Server A
-    │                     │
-    │                     ├── 数据处理中...需要 LLM 帮助判断
-    │                     │    └── sampling/createMessage
-    │                     ▼
-    │               LLM 生成 tool_call: "调用 Server B 的 analyze_deeper"
-    │                     │
-    │                     ▼
-    │               Server B 执行 analyze_deeper
-    │                     │
-    │                     └── 也需要 LLM 帮助 → sampling/createMessage
-    │                     ▼
-    │               LLM 又生成了 tool_call → Server C → ∞
-    │
-    └────────── 无限循环，Token 消耗失控
-```
-
-**防护方案一：深度限制（Max Recursion Depth）**
-
-```python
-class SamplingGuard:
-    """Sampling 递归深度防护"""
-
-    def __init__(self, max_depth: int = 3):
-        self.max_depth = max_depth
-        self._call_depth: dict[str, int] = {}  # session_id → current depth
-
-    def check_and_increment(self, session_id: str) -> bool:
-        """检查是否允许此次 Sampling。返回 True = 允许"""
-        current = self._call_depth.get(session_id, 0)
-        if current >= self.max_depth:
-            return False
-        self._call_depth[session_id] = current + 1
-        return True
-
-    def decrement(self, session_id: str):
-        """Sampling 完成后减少深度计数"""
-        current = self._call_depth.get(session_id, 0)
-        if current > 0:
-            self._call_depth[session_id] = current - 1
-```
-
-**防护方案二：调用链指纹去重（Trace-based Deduplication）**
-
-```python
-import hashlib
-
-class SamplingTraceGuard:
-    """基于调用链指纹的去重防护
-
-    原理：为每个 Sampling 请求生成指纹（Server ID + 请求内容 hash）。
-    同一指纹在调用链中出现超过 N 次 → 判定为循环，拒绝。
-    """
-
-    def __init__(self, max_occurrence: int = 2):
-        self.max_occurrence = max_occurrence
-        self._chains: dict[str, dict[str, int]] = {}  # trace_id → {fingerprint → count}
-
-    def check_and_record(
-        self, trace_id: str, server_id: str, sampling_content: str
-    ) -> bool:
-        fingerprint = hashlib.sha256(
-            f"{server_id}:{sampling_content}".encode()
-        ).hexdigest()[:16]
-        chain = self._chains.setdefault(trace_id, {})
-        count = chain.get(fingerprint, 0) + 1
-        chain[fingerprint] = count
-        return count <= self.max_occurrence
-```
-
-**防护方案三：全局 Sampling Token 预算控制**
-
-```python
-class SamplingBudget:
-    """全局 Sampling Token 预算
-
-    每个 session 有固定 Token 配额。每次 Sampling 消耗配额（基于请求的 max_tokens）。
-    配额耗尽后拒绝所有 Sampling 请求。
-    """
-
-    def __init__(self, budget_per_session: int = 10000):
-        self.budget_per_session = budget_per_session
-        self._remaining: dict[str, int] = {}
-
-    def init_session(self, session_id: str):
-        self._remaining[session_id] = self.budget_per_session
-
-    def try_consume(self, session_id: str, max_tokens: int) -> bool:
-        remaining = self._remaining.get(session_id, 0)
-        if remaining < max_tokens:
-            return False
-        self._remaining[session_id] = remaining - max_tokens
-        return True
-```
-
-**多层防护组装：**
-
-```python
-class SamplingSecurityManager:
-    """三层防护：深度限制 → 调用链去重 → Token 预算"""
-
-    def __init__(self):
-        self.depth_guard = SamplingGuard(max_depth=3)
-        self.trace_guard = SamplingTraceGuard(max_occurrence=2)
-        self.budget = SamplingBudget(budget_per_session=10000)
-
-    def authorize_sampling(
-        self, session_id: str, trace_id: str,
-        server_id: str, sampling_content: str, max_tokens: int
-    ) -> tuple[bool, str]:
-        # Layer 1
-        if not self.depth_guard.check_and_increment(session_id):
-            return False, f"递归深度超限 ({self.depth_guard.max_depth})"
-        # Layer 2
-        if not self.trace_guard.check_and_record(trace_id, server_id, sampling_content):
-            self.depth_guard.decrement(session_id)
-            return False, "检测到 Sampling 循环调用模式"
-        # Layer 3
-        if not self.budget.try_consume(session_id, max_tokens):
-            self.depth_guard.decrement(session_id)
-            return False, f"Token 配额耗尽 (剩余: {self.budget.get_remaining(session_id)})"
-        return True, "OK"
-```
-
-##### 维度二：Token 成本归属与计费模型
-
-**核心问题**：Sampling 产生的 LLM Token 消耗，谁买单？
-
-```
-Sampling 的成本归属模型：
-
-  模型 A：客户端全责（Client-pays-all）
-  ┌─────────────────────────────────────────────────────────┐
-  │  所有 Sampling Token 计入 Client 账单                    │
-  │  优点：简单                                              │
-  │  缺点：恶意 Server 可大量消耗 Token                       │
-  │  适用：个人使用、内部工具                                 │
-  └─────────────────────────────────────────────────────────┘
-
-  模型 B：按请求方分摊（Caller-pays）
-  ┌─────────────────────────────────────────────────────────┐
-  │  用户直接引发的 tool call → 用户买单                     │
-  │  Server 内部逻辑触发的 Sampling → Server 方买单          │
-  │  优点：公平                                              │
-  │  缺点：实现复杂，需要区分调用来源                          │
-  │  适用：企业级平台                                        │
-  └─────────────────────────────────────────────────────────┘
-
-  模型 C：预算上限 + 超额审批（Budget-cap + Overdraft）
-  ┌─────────────────────────────────────────────────────────┐
-  │  每个 Server 注册时声明 Sampling 预算上限                │
-  │  预算内自动批准，超额弹用户确认对话框                     │
-  │  优点：灵活，用户最终决定权                               │
-  │  缺点：用户交互中断                                      │
-  │  适用：SaaS 产品（如 Claude Desktop）                     │
-  └─────────────────────────────────────────────────────────┘
-```
-
-##### 维度三：Sampling 与 Elicitation 的对比
-
-| 维度 | Sampling | Elicitation |
-|------|----------|-------------|
-| **交互对象** | Server → LLM | Server → 用户（人类） |
-| **协议方法** | `sampling/createMessage` | `elicitation/create` |
-| **Token 消耗** | 消耗 LLM Token（有计费关切） | 无 Token 消耗 |
-| **安全风险** | 高（LLM 行为被外部 Server 引导） | 中（用户信息被诱导） |
-| **用户感知** | 可能不可见（取决于 Host） | 始终可见（弹出 UI） |
-| **典型场景** | 摘要生成、推理辅助 | 表单引导填充、意图澄清、操作确认 |
-
 #### 3.4.5 Elicitation（引导模式）—— Server 向用户提问
 
 Elicitation 是 **2025-03-26 版本引入的新原语**。它允许 MCP Server 主动向用户提问，获取工具执行所需的额外信息。当前大多数教材仅提及该词，但大厂面试中可能被深挖。
@@ -1108,6 +1037,14 @@ Elicitation 是四个基础原语之外的**第五种交互模式**，其核心�
 **面试核心区分**："Elicitation 是 Server → 用户（人类交互），Sampling 是 Server → LLM（模型交互）。前者不消耗 Token，始终可见 UI；后者消耗 Token，是纯数据交互。"
 
 ---
+
+
+
+
+
+
+
+
 
 ### 3.5 传输方式性能基准测试
 
@@ -1300,6 +1237,10 @@ if __name__ == "__main__":
 | CI/CD Pipeline（一次性） | stdio 或 Stateless HTTP | 取决于模式 | — |
 | 移动端（网络不稳定） | Streamable HTTP Stateless | 取决于网络 | — |
 
+
+
+
+
 ## 四、底层原理——JSON-RPC 消息格式与能力协商
 
 ### 4.1 JSON-RPC 消息类型完整规范
@@ -1394,6 +1335,103 @@ Client 能力声明                 Server 能力声明
          │   roots.listChanged (Client 独有能力)│
          └─────────────────────┘
 ```
+
+## MCP 能力声明的本质
+
+:rocket:
+
+在 `initialize` 请求和响应中，客户端和服务器各自发送一个 `capabilities` 对象。这个对象的每一字段都表示：**“我（发送方）已经准备好接收和处理对方发起的、与该能力相关的 JSON-RPC 请求。”**
+
+- **客户端声明的能力**（如 `roots`, `sampling`, `elicitation`）：客户端承诺它可以处理服务器将来发送的某些请求（例如 `roots/list`、`sampling/createMessage`、`elicitation/createRequest`）。
+- **服务器声明的能力**（如 `tools`, `resources`, `prompts`）：服务器承诺它可以处理客户端将来发送的某些请求（例如 `tools/call`、`resources/read`、`prompts/get`）。
+
+也就是说，**能力的声明方是被动方（接收请求方），而另一方是主动方（发起请求方）**。
+
+**能力协商是为了解决“客户端与服务器之间“能力不对称”和“动态发现”的问题，让双方在建立底层通信连接后，能够互相告知“我能做什么、我需要你做什么”，从而决定这个会话期间可以安全地使用哪些高级功能。**
+
+下面我分三个层次讲清楚：
+
+---
+
+## 一、没有能力协商时，会出现什么麻烦？
+
+假设没有 MCP，你直接写一个 AI 应用，想集成一个“文件系统工具”。你会怎么做？大概率是**硬编码**：
+
+- 你事先知道这个工具提供 `list_directory`、`read_file`、`write_file` 三个函数。
+- 你写代码时就把这些函数名、参数格式写死在客户端。
+- 如果工具升级了，新增了 `delete_file`，你得修改客户端代码再重新发布。
+- 如果另一个工具只提供 `read_file` 和 `write_file`，没有 `list_directory`，你又要写一套不同的调用逻辑。
+
+这种模式的问题是：**客户端必须提前知道服务器的全部能力细节，而且能力变更会导致客户端代码变更**。
+
+---
+
+## 二、MCP 能力协商解决了什么具体问题？
+
+MCP 把“连接建立”和“能力发现”分离：
+
+1. **建立通信通道**（TCP/stdio/HTTP） – 这一步只保证双方能收发 JSON-RPC 消息。
+2. **能力协商** – 双方交换 `capabilities` 对象，告诉对方：
+   - 我支持哪些 MCP 原语（例如 `tools`、`resources`、`prompts`、`sampling`、`roots`、`elicitation`、`logging` 等）。
+   - 每个原语下有哪些更细的配置（比如 `tools.listChanged` 表示我会通知工具列表变化；`roots.listChanged` 表示我会通知根目录变化）。
+
+**解决的问题**：
+
+### 1. 动态能力发现，消除硬编码
+- 客户端不需要提前知道服务器提供了哪些具体工具（`tools/list` 返回什么），也不需要知道服务器是否支持 `resources` 或 `prompts`。
+- 通过协商，客户端得知“这个服务器支持 `tools` 能力”，于是它可以在后续发送 `tools/list` 请求去获取工具列表。
+- 如果服务器只支持 `resources` 而不支持 `tools`，客户端就不会尝试调用工具，避免出错。
+
+### 2. 多客户端、多服务器的互操作性
+- 同一个客户端可以连接不同能力的服务器：一个服务器支持 `tools` 和 `resources`，另一个只支持 `prompts`。客户端根据协商结果动态调整自己的行为。
+- 同一个服务器可以被不同客户端连接：有的客户端支持 `sampling`（可以用自己的 LLM 帮服务器思考），有的不支持；服务器可以根据客户端是否声明了 `sampling` 来决定是否发起 `sampling/createMessage` 请求。
+
+### 3. 会话级别的安全与权限边界
+- 能力协商不是“全局注册”，而是**每次连接独立协商**。同一个服务器，连接客户端 A 时可能启用了 `tools` 能力，连接客户端 B 时可能因为客户端没有声明 `roots` 能力，服务器就不会暴露需要访问本地文件系统的工具。
+- 这允许精细的权限控制：比如服务器可以同时提供“高权限工具”和“低权限工具”，但只有那些在协商时声明了 `roots` 且提供特定根目录的客户端，才会看到高权限工具。
+
+---
+
+## 三、回到你的具体疑问：“是在建立通信的基础上再确定能用什么工具吗？”
+
+**是的，完全正确。**
+
+流程顺序：
+
+1. **底层连接建立**（例如启动一个子进程通过 stdio 通信，或者通过 HTTP 建立 TCP 连接）。
+2. **客户端发送 `initialize` 请求**，带上自己的 `capabilities`（比如 `{ "roots": { "listChanged": true }, "sampling": {} }`）。
+3. **服务器响应 `initialize`**，带上自己的 `capabilities`（比如 `{ "tools": {}, "resources": {} }`）。
+4. **客户端发送 `initialized` 通知**，表示协商完成，可以进入操作阶段。
+5. **客户端根据服务器的 `capabilities` 决定后续行为**：
+   - 如果服务器声明了 `tools`，客户端可以调用 `tools/list` 获取具体工具列表，然后向模型展示这些工具。
+   - 如果服务器声明了 `resources`，客户端可以调用 `resources/list` 获取资源列表，并订阅变化。
+   - 如果服务器没有声明 `tools`，客户端永远不会调用 `tools/list`，也不会尝试让模型去调用该服务器的工具。
+
+所以**工具的具体名称、参数、描述（即工具列表）不是在协商阶段传输的**，协商阶段只传递“是否支持 tools 这个能力类”。具体工具列表是在协商完成后的操作阶段，通过额外的 `tools/list` 请求来获取的。
+
+---
+
+## 四、为什么需要两层（能力协商 + 具体列表）？
+
+| 层次     | 内容                                            | 传输时机         | 作用                                              |
+| -------- | ----------------------------------------------- | ---------------- | ------------------------------------------------- |
+| 能力协商 | `capabilities` 对象（布尔/简单结构）            | 连接初始化时     | 让双方快速了解对方支持哪些 MCP 原语，避免无效请求 |
+| 具体列表 | `tools/list`、`resources/list` 等返回的详细数组 | 操作阶段按需请求 | 获取实际可用的函数名称、参数、描述等细节          |
+
+分两层的好处：
+- 能力协商非常轻量，不需要传输大量 schema。
+- 能力协商结果决定后续哪些 list 请求是合法的，服务器可以拒绝未协商的能力请求。
+- 具体列表可以动态变化（例如服务器热加载了新工具），通过 `listChanged` 通知机制告知客户端重新拉取，无需重新协商连接。
+
+---
+
+## 五、总结一句话
+
+> **MCP 能力协商解决的是“客户端与服务器在建立连接后，如何在不硬编码、不预先约定的情况下，动态发现对方支持哪些高级功能（如工具、资源、提示、采样等），并据此安全地协调后续通信”的问题。它是在底层通信通道之上、具体数据交换之前的一层握手协议，目的是实现解耦、可扩展和安全的互操作。**
+
+
+
+
 
 #### Client 端能力声明（ClientCapabilities）
 
@@ -1511,6 +1549,8 @@ Server → Client: initialize {
 
 这种设计支持了**动态加载插件**和**运行时升级**等场景。
 
+
+
 ### 4.3 通知机制（Notification System）
 
 MCP 的通知机制是协议中一个重要的设计——它允许一方在不期待回复的情况下向另一方推送信息。
@@ -1546,6 +1586,134 @@ MCP 标准通知分类
 │  cancelled            → 通知某操作已被取消             │
 └─────────────────────────────────────────────────────┘
 ```
+
+## 📌 核心概念：JSON-RPC 通知
+
+MCP协议完全遵循 JSON-RPC 2.0 规范，这意味着所有通知本质上都是一个单向消息，由发送方发出，**接收方绝对不需要、也不应该发送任何响应**。通知消息中**不得包含ID字段**，这与请求和响应的格式形成明确区分。
+
+---
+
+## 📡 标准方法列表
+
+MCP规范定义了以下标准通知方法：
+
+| 方法                                   | 方向            | 功能                 |
+| -------------------------------------- | --------------- | -------------------- |
+| `notifications/initialized`            | client → server | 客户端确认完成初始化 |
+| `notifications/cancelled`              | 双向            | 取消正在进行的请求   |
+| `notifications/progress`               | 双向            | 报告长时间操作进度   |
+| `logging/message`                      | server → client | 发送结构化日志消息   |
+| `notifications/roots/list_changed`     | server → client | 根目录列表变更       |
+| `notifications/resources/list_changed` | server → client | 资源列表整体变更     |
+| `notifications/resources/updated`      | server → client | 特定资源内容更新     |
+| `notifications/tools/list_changed`     | server → client | 工具列表变更         |
+
+---
+
+## 🔄 完整的消息生命周期
+
+为了让大家对MCP的消息机制建立更清晰的框架，以下是通知如何融入协议的全流程：
+
+1.  **初始化阶段**：客户端发送 `initialize` 请求（包含能力声明和协议版本）。
+2.  **协议版本协商**：服务器根据客户端发送的版本和自身支持的版本列表，确定本次会话使用的协议版本。
+3.  **能力协商**：服务器在 `initialize` 响应中返回其支持的能力集（如日志、资源更新通知等）。
+4.  **准备就绪**：客户端发送 `notifications/initialized` 通知，表示已完成初始化准备。
+5.  **正常操作**：初始化完成后即可开始发送请求和处理通知。**重要**：服务器在收到 `initialized` 通知前，不应发送除了 `ping` 和 `logging` 以外的请求或通知。
+6.  **任务协作**：双方可通过 `requests/progress` 等机制进行协作。
+7.  **优雅终止**：客户端发送 `shutdown` 请求，等待成功后发送 `exit` 通知。
+
+---
+
+## 🛠️ 核心通知类型深度解析
+
+### 1. `notifications/initialized` (初始化完成确认)
+- **方向**：client → server
+- **触发时机**：`initialize` 请求/响应成功完成后，客户端**必须**立即发送此通知。
+- **内容**：空对象 `{}`。
+- **协议作用**：它标志着手握阶段正式结束，是双方开始正常通信的“发令枪”。在它被发送之前，服务器的功能是受限的。
+
+### 2. `notifications/cancelled` (取消通知)
+- **方向**：双向
+- **触发时机**：任何一方在请求超时前未能收到 `success` 或 `error` 响应时，应发送此通知。
+- **参数**：
+  - `requestId`: 必需，正在取消的请求ID，接收方可精准终止操作。
+  - `reason`: 可选，提供取消原因（如 `"timeout"`、`"user_abort"`）。
+- **使用场景**：当模型调用一个可能耗时极长的工具且用户主动选择中断时，客户端可通过此通知避免无效计算和资源浪费。
+
+### 3. `notifications/progress` (进度报告)
+- **方向**：双向
+- **功能**：为长时间运行的操作提供可选的进度跟踪。
+- **机制**：依赖于**进度令牌 (`progressToken`)**。请求发起方在请求中包含此令牌，接收方在处理过程中使用该令牌多次发送进度通知，直到任务完成。
+- **令牌原则**：进度令牌必须是**不透明的**，接收方无法解析其内容。进度通知**仅能引用**在活跃请求中提供的令牌，且该令牌必须关联到进行中的操作。
+- **用法**：
+  - **发起方**：`{"_meta": {"progressToken": "task-123"}}`
+  - **执行方**：`{"method": "notifications/progress", "params": {"progressToken": "task-123", "progress": 50, "total": 100}}`
+- **使用场景**：文件上传、大数据分析、视频转码等耗时任务，避免客户端误以为连接已死。
+
+### 4. `logging/message` (结构化日志)
+- **方向**：server → client
+- **功能**：为服务器提供了向客户端发送结构化日志消息的标准化方式。
+- **参数包含：
+  - `level`: 严重性级别 (e.g., `"debug"`, `"info"`, `"error"`)
+  - `logger`: 可选的记录器名称
+  - `data`: 任意 JSON 可序列化数据
+- **客户端控制**：客户端可以设置最低日志级别来控制日志详细程度。
+- **使用场景**：调试服务器功能、监控服务器内部状态，是实现"智能工具"的重要手段。
+
+---
+
+## 📁 资源变更通知
+
+这组通知构成了一个精密的 **“订阅-推送”模型**，确保客户端高效获取最新资源，而无需频繁轮询：
+
+1.  **能力声明**：服务器需在 `initialize` 响应中声明 `{"resources": {"subscribe": true, "listChanged": true}}`。
+2.  **订阅管理**：
+    - **`resources/subscribe`**：客户端显式订阅特定资源 URI。
+    - **`resources/unsubscribe`**：客户端主动取消订阅以节省资源。
+3.  **服务器推送变更**：
+    - **`notifications/resources/updated`**：当**已订阅**的特定资源内容发生变化时，服务器必须发送此通知。通知**必须**包含资源 URI。客户端收到后应重新发送 `resources/read` 请求以获取最新内容。
+    - **`notifications/resources/list_changed`**：当整个可用资源列表发生结构性变化（如新增或删除），且客户端已支持 `listChanged` 标志时触发。
+4.  **变更发现**：
+    - **`notifications/tools/list_changed`**：当服务器支持的工具集（名称、描述、参数）发生动态变化时触发，提示客户端重新调用 `tools/list`。
+    - **`notifications/roots/list_changed`**：当客户端能访问的根目录列表发生变化时触发。
+
+---
+
+## 🧠 关键设计原则
+
+### 基于能力的通知
+通知和请求一样，都是**基于能力的**。这意味着在`initialize`阶段，双方必须明确声明其支持通知类型。若服务器未声明`listChanged`能力，客户端便不会收到`list_changed`通知。这种机制确保了协作中不会出现意外的消息，增强了协议的健壮性。
+
+### 通知不是“控制台日志”
+通知并非简单的调试信息，它们是**协议层面的一等公民**。例如，`notifications/roots/list_changed` 不是一个开发提示，而是MCP协议规定的一种标准机制，用于主动告知客户端文件系统结构已发生变化。
+
+### 请求作用域通知
+对于`progress`和`cancelled`这类与特定请求相关的通知，它们**必须通过该请求的响应流来传输**，而非通过独立的订阅/监听流。这确保了通知与原始请求的上下文紧密关联，避免了状态管理的混乱。
+
+### 主动推送 vs. 轮询
+MCP致力于让服务器能够主动向客户端推送变更，而不是让客户端频繁轮询。这种设计更现代化，能有效提升效率并减少延迟。如果一个变更通知丢失了，客户端可通过全量列表请求（如`resources/list`）来强制同步状态，最终保证数据一致性。
+
+---
+
+## 📊 通知机制的实现模式
+
+总结MCP中通知的实现，可以分为三种模式：
+
+1.  **异步报告模式**：一方发出请求（如工具调用），另一方通过`progress`通知反馈执行情况，但最终仍通过请求的响应`result`来返回最终结果。
+2.  **主动变更推送模式**：服务器自主检测到状态变化（如文件修改），直接通过`updated`或`list_changed`通知告知所有相关客户端。
+3.  **流程控制模式**：双方通过`initialized`和`cancelled`等通知来管理连接的生命周期和任务状态。
+
+---
+
+## 💎 总结
+
+MCP的通知机制并非简单的状态传递，而是一套**以能力声明的双向通信系统**。它通过`progress`、`logging`、`cancelled`及各种`list_changed`等通知，将通信的双方有机地连接起来。这使得构建的AI应用不再是简单的请求-响应处理器，而是能够实时感知环境变化、主动向客户端报告进度、并根据用户行为优雅中止任务的智能系统。
+
+
+
+
+
+
 
 #### 进度通知（Progress Notification）
 
