@@ -1,12 +1,5 @@
 # 第二模块：MCP 协议层深入理解
 
-> **学习周期**：5-6 天  
-> **学习目标**：理解 MCP 的底层通信协议、传输方式和核心原语，具备排障能力。掌握
-> 协议版本间代码级差异、跨版本兼容策略、传输性能量化选型、Sampling 深度安全防
-> 护和 Elicitation 引导模式。
-
----
-
 ## 目录
 
 1. [一、是什么——MCP 协议全景回顾](#一是什么mcp-协议全景回顾)
@@ -18,7 +11,6 @@
 4. [四、底层原理——JSON-RPC 消息格式与能力协商](#四底层原理json-rpc-消息格式与能力协商)
    - [4.5 协议版本逐项差异对照与兼容策略](#45-协议版本逐项差异对照与兼容策略)
 5. [五、企业级最佳实践](#五企业级最佳实践)
-6. [六、常见面试题](#六常见面试题)
 
 ---
 
@@ -101,9 +93,9 @@ stdio（标准输入输出）是最简单的进程间通信方式：父进程启
 
 - 调试简单——可以直接在终端看到输入输出
 
-  你的直觉“难道不是同级别吗”在**操作系统调度**层面是对的（父子进程都是独立的运行单元），但在**通信通道的拥有权**上，它们确实是**上下级（专有）**关系。要解开这个疑惑，需要从“**谁创建了管道**”和“**谁握着管道的门把手**”说起。为什么“只有”父进程能通信？（所有权问题）
+  本质：
 
-  标准输入输出（stdio）本质上是**进程打开的文件描述符（FD）**。
+  标准输入输出（stdio）本质上是**进程打开的文件描述符（FD）**。:o::o::o::o::o::o::o:
 
   - **子进程**只有 `stdin`（0号）和 `stdout`（1号）这两个**端口**。
   - 而**父进程**手里握着的是连接这两个端口的**管道（Pipe）的另一端**。
@@ -111,10 +103,6 @@ stdio（标准输入输出）是最简单的进程间通信方式：父进程启
   在操作系统层面：
   父进程握有管道的**写端**（用来往子进程的 `stdin` 写数据）和**读端**（用来读子进程 `stdout` 的输出）。
   **其他同级进程（第三方应用）没有这个管道另一端的句柄（Handle/FD）**。它们既不知道这个管道的 ID，也没有权限打开它，所以自然无法往里面写数据，也无法从中读取数据。
-
-  > **类比（门禁卡）**：
-  > 父进程是**房东**，他在楼里建了一个专属密室（子进程），并把唯一的一张门禁卡（stdin/stdout管道）交给了密室里的保安。
-  > 只有房东（父进程）能通过这个门禁系统跟保安对话。外面路过的其他同级路人（同级进程），因为没有这张卡，也没资格进楼，当然无法跟保安通话。
 
 **局限：**
 - 只能本地通信，无法远程访问
@@ -150,7 +138,7 @@ SSE（Server-Sent Events）在 HTTP 之上提供了服务端向客户端推送�
 
 **SSE 的局限与 Streamable HTTP 的诞生：**
 
-SSE 的一个核心问题是**连接不可恢复**——如果 SSE 长连接断开，Client 必须重新发起 HTTP POST 请求获取新数据。这在移动网络或负载均衡器环境下频繁发生。
+SSE 的一个核心问题是**连接不可恢复**——如果 SSE 长连接断开，Client 必须重新发起 HTTP POST 请求获取新数据。:o::o::o:这在移动网络或负载均衡器环境下频繁发生。:o::o::o::o::o:
 
 此外，SSE 要求 Server 为每个 Client 维护一个长连接，当 Client 数量激增时（比如一个有数万 AI 用户的 SaaS 平台），Server 的连接压力会非常大。
 
@@ -186,7 +174,7 @@ Streamable HTTP 是 **2025 年新增的默认传输方式**，它融合了 stdio
 
 | 特性 | SSE | Streamable HTTP |
 |------|-----|-----------------|
-| 连接可恢复性 | 断开后需完整重建 | 请求间无状态，任意重组 |
+| 连接可恢复性 | 断开后需完整重建 | 请求间无状态，任意重组:o: |
 | Server 连接压力 | 每 Client 一个长连接 | 按需建立，可池化 |
 | 双向流支持 | 单向推送 + 独立 POST | 统一在 HTTP 上双向流 |
 | 模式灵活性 | 仅 Stateful | 支持 Stateless 和 Stateful 两种模式 |
@@ -194,17 +182,11 @@ Streamable HTTP 是 **2025 年新增的默认传输方式**，它融合了 stdio
 
 
 
-
-
-
-
-为了深入理解它们的差异，我们抛开表面结论，回到协议的底层逻辑，进行一次“从原理到实现，从实现到架构”的深度拆解。
-
-## 💡 核心：Streamable HTTP = 回归标准 + 按需流式
+### 💡 核心：Streamable HTTP = 回归标准 + 按需流式
 
 在深入技术细节前，我们先理解本质差异：**SSE是一个有状态的专用推送通道，而Streamable HTTP是基于无状态HTTP的、按需启用的流式响应**。这是两者所有差异的根源。
 
-### 一、清晰界定：SSE和Streamable HTTP到底是什么？
+#### 一、清晰界定：SSE和Streamable HTTP到底是什么？
 
 #### 1. SSE是什么？
 
@@ -216,7 +198,17 @@ SSE（Server-Sent Events）是一项:rocket:**有状态**的单向传输技术�
 
 #### 2. Streamable HTTP是什么？
 
-Streamable HTTP是MCP协议在2025年3月26日正式引入的传输机制，它并没有发明新协议，而是利用了**标准HTTP的现有能力**（如Transfer-Encoding: chunked），实现了更灵活的通信模式。在最新修订中，工作流得到了进一步简化：
+Streamable HTTP是MCP协议在2025年3月26日正式引入的传输机制，它并没有发明新协议，而是利用了**标准HTTP的现有能力**:o::o::o::o::o::o::o::o::o::o:（如Transfer-Encoding: chunked）:o::o:，实现了更灵活的通信模式。在最新修订中，工作流得到了进一步简化：
+
+#### 与 Content-Length 的区别
+
+| 特性     | Content-Length      | Transfer-Encoding: chunked |
+| :------- | :------------------ | :------------------------- |
+| 长度已知 | 必须知道精确长度:o: | 无需知道                   |
+| 发送方式 | 一次性发送整个体    | 分块逐步发送               |
+| 连接复用 | 支持                | 支持                       |
+| 适用场景 | 静态内容、已知大小  | 动态生成、流式:o::o:       |
+
 - **统一端点**：服务器只暴露一个单一的HTTP端点（如 `/mcp`），所有交互都在此完成。
 - **无状态请求**：客户端将每个JSON-RPC请求或通知封装成一个独立的HTTP POST请求进行发送。
 - **按需流式化**：服务器收到请求后，可以选择返回一个普通的JSON对象，也可以选择将响应:rocket:**升级为一个SSE流**，实现流式传输。
@@ -225,18 +217,13 @@ Streamable HTTP是MCP协议在2025年3月26日正式引入的传输机制，它�
 
 ---
 
-### 二、深入剖析：SSE为什么“不够好”？
+#### 二、深入剖析：SSE为什么“不够好”？
 
 SSE的“不够好”，源于其有状态的双连接设计带来的四个核心问题。
 
 #### 1. 单向通信的交互瓶颈
 
-SSE本身是单向推送的，这在MCP的场景下会产生一个僵硬的“命令-推送”裂谷：
-- **用户** (你的程序) 问：`"北京天气如何？"`
-- **服务器** (或工具) 必须在`GET /sse`的长连接上保持等待，并通过独立的HTTP短连接接收命令。
-- **服务器**开始处理：通过SSE流推送一部分结果`"25°C"`，但推送过程中无法接收任何指令（比如需要用户授权）。
-- 如果要进行双向交互，就必须开辟第二个通道（一个额外的HTTP请求），这会破坏流畅的交互体验。
-
+SSE本身是单向推送的，这在MCP的场景下会产生一个僵硬的“命令-推送”裂谷
 #### 2. 有状态连接的巨大资源消耗:rocket:
 
 SSE的每个连接都需要服务器为其维护状态，这带来了双重的资源负担：
@@ -249,7 +236,6 @@ SSE依赖于“永远在线”的长连接，这与当前主流的、为短连�
 - **负载均衡器困境**：大多数负载均衡器对长时间保持的连接支持不佳，可能导致负载不均衡或错误地终止空闲连接。
 - **CDN的“绊脚石”**：CDN主要通过缓存短连接响应来加速，但无法有效缓存或优化SSE这类实时、动态的长连接。
 - **防火墙干扰**：企业防火墙常常会主动断开长时间空闲的连接。
-- **运维复杂性**：部署SSE需要对基础设施进行特殊配置和调优，这增加了运维成本和故障排查的难度。
 
 #### 4. 不佳的高并发性能
 
@@ -259,7 +245,7 @@ SSE依赖于“永远在线”的长连接，这与当前主流的、为短连�
 
 ---
 
-### 三、架构拆解：Streamable HTTP“好在哪里”？
+#### 三、架构拆解：Streamable HTTP“好在哪里”？
 
 它解决上述问题的核心，就是对标准HTTP请求-响应模型的重构和创造性运用。
 
@@ -269,76 +255,28 @@ Streamable HTTP 通过回归标准的 HTTP POST 请求-响应模式，大幅降�
 - **消除连接建立开销**：客户端每次发起请求都是一个标准的HTTP POST，**不需要为每个请求重新建立TCP连接**。在高频请求场景中，操作系统和网络库可以复用底层的TCP连接。
 - **连接复用，而非复用会话**：Streamable HTTP的“连接复用”是指**操作系统的TCP连接复用**。这消除了反复建立新连接的开销，将首次调用的延迟降低了60%以上。延迟数据可以低至**10-30ms**。
 
-#### 2. 机制：按需启用SSE，实现灵活交互
+#### 2. 机制：按需启用SSE，实现灵活交互:o::o::o::o::o::o::o::o::o::o::o::o::o::o::o::o::o::o::o::o::o::o:
 
-这是Streamable HTTP最精妙的设计，**通过将SSE“降级”为一种可选的响应格式，掌握了何时使用流式响应的控制权**：
+**MCP 的 Streamable HTTP 传输方式很聪明地把 SSE（Server-Sent Events）从“必须一直用的通道”变成了“按需开启的响应格式”。** 这样服务器可以灵活决定什么时候用普通 JSON 响应，什么时候用流式响应，而且多个流式请求可以同时进行，互不干扰。
+
 - **SSE作为响应格式，而非传输机制**：当不需要流式传输时，服务器可以直接返回一个标准的JSON响应。
 - **请求发起流式**：流式传输的发起权在“请求”本身，而非一个独立的“通道”。服务器在处理POST请求时，如果结果需要分块返回，就可以将Content-Type设置为`text/event-stream`，将响应升级为SSE流。
 - **请求内的流式会话**：每个独立的POST请求可以对应一个独立的SSE流式会话。这意味着**客户端可以同时发起多个需要流式响应的请求，而它们之间不会相互干扰**。
 
-#### 3. 机制：拥抱无状态架构，实现水平扩展
+#### 3. 机制：拥抱无状态架构，实现水平扩展:o::o::o::o:
 
 这是Streamable HTTP实现高吞吐量的基石，它通过拥抱**无状态设计**，让MCP服务器在现代云原生环境中轻松扩展：
 - **服务器无需记忆**：每个HTTP POST请求都携带了服务器处理它所需的所有信息。服务器在处理完一个请求后，不保留任何关于客户端的状态，**这让应用服务器的扩展变得像Web服务器一样简单**。
 - **连接数问题被彻底解决**：客户端连接的“数量”与服务器负载的“规模”不再直接挂钩。真正影响服务器性能的是它每秒能处理的HTTP请求数（RPS），而非有多少个客户端连接。
 - **单连接多路复用**：通过单个TCP连接，可以发送无数个HTTP POST请求，并接收对应的响应，其有效性已在高并发测试中得到验证。标准测试数据显示，Streamable HTTP可实现**290-300 RPS**的吞吐量。
 
----
-
-### 四、总结：多维对比
-
-| 对比维度           | SSE                                  | Streamable HTTP                                              |
-| :----------------- | :----------------------------------- | :----------------------------------------------------------- |
-| **通信模式**       | 单向（仅服务器推送）                 | 双向（全双工）                                               |
-| **连接模型**       | 双连接（SSE长连 + HTTP短连）         | 单连接按需流式（客户端POST，服务器可选SSE流）                |
-| **交互流程**       | 建立持久通道，被动监听，独立请求     | 发起标准HTTP请求，按需接收流式响应                           |
-| **服务器状态**     | **有状态**（必须维护每个连接的状态） | :rocket:**无状态**（每个请求独立，状态可客户端维护）         |
-| **连接建立延迟**   | 高（约120-150ms）                    | 极低（约10-30ms）                                            |
-| **服务器负载指标** | `O(N)`个连接（N是客户端数）          | `O(RPS)`个请求/秒                                            |
-| **基础设施兼容**   | 差（需特殊配置）                     | 完美（标准HTTP，兼容所有现代组件）                           |
-| **吞吐量与稳定性** | 低负载稳定，高负载恶化（RPS约30）    | 高负载下稳定（RPS约300）                                     |
-| **协议标准化**     | 专用，不完全遵循HTTP标准             | **100%标准HTTP**，利用`Transfer-Encoding`、`Accept`头等标准机制 |
-| **客户端复杂度**   | 较高（需要管理长连接状态、重连逻辑） | **更低**（只需发送POST请求即可）                             |
-
-
-
 总结：一个有状态一个无状态，一个需要长连接，一个可以不用长连接，并且还能复用tcp连接
-
-
-
-为什么无状态更好扩展呢？:rocket:
-
-### 无状态如何做到轻松扩展？
-
-因为**任意一台服务器都可以处理任意一个请求**。
-
-- 请求 1 到达服务器 A，处理完返回。
-- 请求 2 到达服务器 B，处理完返回。
-- 服务器 A 和 B 之间不需要互相知道对方做了什么，也不需要共享任何内存数据。
-
-你只需要在它们前面放一个负载均衡器，把请求随机分发即可。增加新服务器时，无需改动任何现有逻辑。
-
-**比喻**：就像超市的收银台，每个收银员都可以独立为任何顾客结账。客流量大了，多开几个收银台就行，收银员之间不需要互相打电话“你刚才那个顾客买了什么”。
-
-### 3. 有状态为什么难扩展？
-
-因为有状态的服务器必须把“状态”在多个服务器之间同步，否则请求可能会被发到不认识该客户端的服务器上。
-
-以 SSE 为例：
-
-- 客户端与服务器 A 建立了一个 SSE 长连接，服务器 A 记住了这个连接的状态（比如连接 ID、未发送完的数据等）。
-- 如果服务器 A 宕机，或者负载均衡器把客户端的下一个请求发给了服务器 B，服务器 B 根本没有这个连接的状态，无法继续推送数据。
-- 解决方案：要么让所有客户端始终连接到同一台服务器（失去负载均衡的意义），要么在服务器之间同步状态（例如用 Redis 共享会话数据），但这增加了复杂度和延迟。
-
-
 
 
 
 ### 2.2 为什么需要四大核心原语
 
 从第一模块我们知道 MCP 有三种基础原语（Tools / Resources / Prompts），但规范中实际上定义了**四种核心原语**，第四种是 **Sampling（采样）**。:rocket:2025 年初，MCP 官方宣布 **Sampling 原语已废弃**，不再推荐使用。
-
-为什么需要四种而不是一种或十种？这源于对 "LLM 与外部交互" 场景的完整抽象：
 
 ```
 LLM 的四种外部交互需求：
@@ -368,10 +306,6 @@ LLM 的四种外部交互需求：
 | **Resources** | Client 读取 | Server → Client | 读操作、获取上下文 |
 | **Prompts** | 用户选择 | Server → Client → LLM | 模板化的交互指令 |
 | **Sampling** | Server 请求 | Server → Client → LLM → Client → Server | 反向请求 LLM 生成 |
-
----
-
-
 
 ## 三、如何实现——传输机制与原语详解
 
@@ -425,7 +359,7 @@ stdio 传输使用**换行符分帧**（newline-delimited JSON），即每个 JS
 
 **Pretty-print**（美化打印）是一种将结构化数据（如 JSON、XML、HTML、代码等）以**人类可读的格式**输出的技术，核心特征包括**缩进、换行、对齐和适当的空格**，使层次结构和内容一目了然。
 
-## 为什么需要 pretty-print？
+#### 为什么需要 pretty-print？
 
 计算机处理数据时，追求**最小体积和最高效率**，所以原始格式往往是压缩的（无额外空格、换行）。例如：
 
@@ -454,30 +388,15 @@ stdio 传输使用**换行符分帧**（newline-delimited JSON），即每个 JS
 
 一眼就能看出结构层级。
 
----
-
-## Pretty-print 的核心要素
-
-| 要素              | 说明                                     | 示例                     |
-| ----------------- | ---------------------------------------- | ------------------------ |
-| **缩进**          | 通常使用空格（2或4）或制表符表示嵌套层级 | `␣␣"city":`              |
-| **换行**          | 每个独立元素单独占一行                   | 每对键值对一行           |
-| **对齐**          | 同一层级的元素左对齐                     | 所有键值对的键起始列一致 |
-| **括号/标签配对** | 独立成行或明显标识开始和结束             | `{ ... }` 各占一行       |
-
----
-
-## Pretty-print 的潜在问题（即“为什么不永远使用 pretty-print”）
+#### Pretty-print 的潜在问题
 
 1. **体积膨胀**：对于大 JSON（例如 10 MB 数据），添加缩进和换行可能使体积增加 20%~50%，浪费存储和传输带宽。
 2. **敏感信息暴露**：有些数据在压缩时可能利用字符数模糊处理，美化后更容易被肉眼发现。
 3. **日志泛滥**：将超长对象 pretty-print 到日志文件会迅速消耗磁盘空间，且难以用 `grep` 等单行匹配工具搜索。
 
----
 
 
-
-### 3.2 SSE 传输实现
+## 3.2 SSE 传输实现
 
 #### 架构
 
@@ -492,61 +411,54 @@ GET  /health → (可选) 健康检查端点
 #### Client 端实现
 
 ```python
-import httpx
-import json
-import asyncio
-
-class SSEClientTransport:
-    def __init__(self, base_url: str):
+类 SSEClientTransport:
+    初始化(base_url):
         self.base_url = base_url
-        self.message_id = 0
-        self.pending_requests: dict[int, asyncio.Future] = {}
+        self.message_id = 0                    # 自增消息ID
+        self.pending_requests = {}             # {id: Future} 等待响应的请求
 
-    async def connect(self):
-        """建立 SSE 连接，开始接收服务端推送"""
-        self.sse_client = httpx.AsyncClient(timeout=None)
-        async with self.sse_client.stream("GET", f"{self.base_url}/mcp") as response:
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    data = json.loads(line[6:])
-                    await self._handle_message(data)
+    方法 connect():
+        # 建立 SSE 长连接
+        创建异步 HTTP 客户端(超时=无限)
+        打开到 {base_url}/mcp 的 GET 流式连接
+        对于流中的每一行:
+            如果行以 "data: " 开头:
+                解析 JSON 数据
+                调用 _handle_message(数据)
 
-    async def send(self, method: str, params: dict = None) -> dict:
-        """发送 JSON-RPC 请求并等待响应"""
+    方法 send(method, params):
+        # 发送请求并等待对应响应
         self.message_id += 1
         request = {
             "jsonrpc": "2.0",
             "id": self.message_id,
             "method": method,
-            "params": params or {}
+            "params": params
         }
 
-        # 创建 Future 等待响应
-        future = asyncio.get_event_loop().create_future()
+        # 创建一个 Future 用于等待此请求的响应
+        future = 创建新的 Future
         self.pending_requests[self.message_id] = future
 
         # 通过 HTTP POST 发送请求
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"{self.base_url}/mcp",
-                json=request,
-                headers={"Content-Type": "application/json"}
-            )
+        创建异步 HTTP 客户端
+        向 {base_url}/mcp 发送 POST 请求，body 是上面的 JSON
 
-        return await future
+        # 立即返回 Future，调用者可以 await 它
+        return future
 
-    async def _handle_message(self, data: dict):
-        """处理来自 SSE 流的消息"""
-        if "id" in data and data["id"] in self.pending_requests:
-            # 这是对某个请求的响应
-            future = self.pending_requests.pop(data["id"])
-            if "result" in data:
-                future.set_result(data["result"])
-            elif "error" in data:
-                future.set_exception(Exception(data["error"]))
+    方法 _handle_message(data):
+        # 处理来自 SSE 流的消息
+        if data 中包含 "id" 且 id 在 pending_requests 中:
+            # 这是某个请求的响应
+            取出对应的 future 并从 pending_requests 中移除
+            if data 中有 "result":
+                future.set_result(data["result"])    # 成功，设置结果
+            else if data 中有 "error":
+                future.set_exception(Exception(data["error"]))  # 失败，抛出异常
         else:
-            # 这是 Server 的主动通知
-            await self._handle_notification(data)
+            # 这是服务器主动推送的通知
+            调用 _handle_notification(data)
 ```
 
 #### Server 端实现
@@ -616,6 +528,7 @@ class SSEServerTransport:
 Streamable HTTP 支持两种运行模式：
 
 **Stateless 模式（无状态）：**
+
 ```
 每个 HTTP 请求都是独立的。Client 发 POST，Server 返回响应后连接关闭。
 下一个请求可以是全新的 HTTP 连接。
@@ -624,6 +537,7 @@ Streamable HTTP 支持两种运行模式：
 ```
 
 **Stateful 模式（有状态）：**
+
 ```
 Client 与 Server 之间维护 Session。Server 可以在 Session 期间
 通过 Server→Client 方向推送通知（在响应流中持续输出）。
@@ -1067,119 +981,6 @@ Elicitation 是四个基础原语之外的**第五种交互模式**，其核心�
 
 面试中经常被追问："stdio 和 Streamable HTTP 哪个更快？差多少？"以下基于统一测试场景的量化数据，确保回答时有据可依。
 
-#### 3.5.1 测试场景与代码
-
-**测试代码**（所有模式使用同一框架）：
-
-```python
-# benchmark.py —— MCP 传输性能基准测试
-# 依赖: pip install mcp==1.3.0
-import asyncio
-import time
-import statistics
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamable_http_client
-
-
-class MCPBenchmark:
-    """MCP 传输性能基准测试"""
-
-    def __init__(self, iterations: int = 1000, warmup: int = 50):
-        self.iterations = iterations
-        self.warmup = warmup
-        self.results: dict[str, list[float]] = {}
-
-    async def benchmark_stdio(self, server_command: list[str]):
-        """测试 stdio 传输"""
-        server_params = StdioServerParameters(
-            command=server_command[0], args=server_command[1:]
-        )
-        latencies = []
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                for _ in range(self.warmup):
-                    await session.list_tools()
-                for i in range(self.iterations):
-                    start = time.perf_counter()
-                    await session.list_tools()
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    latencies.append(elapsed_ms)
-        self.results["stdio"] = latencies
-        return self._compute_stats(latencies)
-
-    async def benchmark_streamable_http_stateful(self, base_url: str):
-        """测试 Streamable HTTP Stateful 模式（复用连接）"""
-        latencies = []
-        async with streamable_http_client(base_url, stateless=False) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                for _ in range(self.warmup):
-                    await session.list_tools()
-                for i in range(self.iterations):
-                    start = time.perf_counter()
-                    await session.list_tools()
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    latencies.append(elapsed_ms)
-        self.results["streamable_http_stateful"] = latencies
-        return self._compute_stats(latencies)
-
-    async def benchmark_streamable_http_stateless(self, base_url: str):
-        """测试 Streamable HTTP Stateless 模式（每次新建连接）"""
-        latencies = []
-        for i in range(self.iterations + self.warmup):
-            async with streamable_http_client(base_url, stateless=True) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    if i >= self.warmup:
-                        start = time.perf_counter()
-                        await session.list_tools()
-                        elapsed_ms = (time.perf_counter() - start) * 1000
-                        latencies.append(elapsed_ms)
-        self.results["streamable_http_stateless"] = latencies
-        return self._compute_stats(latencies)
-
-    def _compute_stats(self, latencies: list[float]) -> dict:
-        sorted_lat = sorted(latencies)
-        n = len(sorted_lat)
-        return {
-            "count": n,
-            "mean_ms": statistics.mean(latencies),
-            "p50_ms": sorted_lat[int(n * 0.50)],
-            "p90_ms": sorted_lat[int(n * 0.90)],
-            "p99_ms": sorted_lat[int(n * 0.99)],
-            "min_ms": min(latencies),
-            "max_ms": max(latencies),
-            "throughput_per_sec": 1000 / statistics.mean(latencies)
-                if statistics.mean(latencies) > 0 else 0
-        }
-
-    def print_report(self):
-        print("\n" + "=" * 80)
-        print("MCP 传输性能基准测试报告")
-        print(f"测试次数: {self.iterations} (预热 {self.warmup} 次)")
-        fmt = "{:<35} {:>10} {:>10} {:>10} {:>15}"
-        print(fmt.format("模式", "Mean(ms)", "P50(ms)", "P99(ms)", "Throughput/s"))
-        print("-" * 80)
-        for mode, stats in sorted(self.results.items()):
-            print(fmt.format(
-                mode, f"{stats['mean_ms']:.2f}", f"{stats['p50_ms']:.2f}",
-                f"{stats['p99_ms']:.2f}", f"{stats['throughput_per_sec']:.0f}"
-            ))
-
-
-async def main():
-    bench = MCPBenchmark(iterations=1000, warmup=50)
-    await bench.benchmark_stdio(["python", "minimal_server.py"])
-    await bench.benchmark_streamable_http_stateful("http://localhost:8000/mcp")
-    await bench.benchmark_streamable_http_stateless("http://localhost:8000/mcp")
-    bench.print_report()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
 #### 3.5.2 基准测试数据
 
 **测试环境**：Apple M2 Pro / Intel i7-13700K, 16-32GB RAM, Python 3.12, MCP SDK 1.3.0, localhost。数据为基于 SDK 源码分析和同等场景 LSP 实测数据的工程估算值（标注 `[E]` = Estimated）：
@@ -1370,7 +1171,7 @@ Client 能力声明                 Server 能力声明
 
 ---
 
-## 一、没有能力协商时，会出现什么麻烦？
+#### 一、没有能力协商时，会出现什么麻烦？
 
 假设没有 MCP，你直接写一个 AI 应用，想集成一个“文件系统工具”。你会怎么做？大概率是**硬编码**：
 
@@ -1383,14 +1184,14 @@ Client 能力声明                 Server 能力声明
 
 ---
 
-## 二、MCP 能力协商解决了什么具体问题？
+#### 二、MCP 能力协商解决了什么具体问题？
 
 MCP 把“连接建立”和“能力发现”分离：
 
 1. **建立通信通道**（TCP/stdio/HTTP） – 这一步只保证双方能收发 JSON-RPC 消息。
 2. **能力协商** – 双方交换 `capabilities` 对象，告诉对方：
-   - 我支持哪些 MCP 原语（例如 `tools`、`resources`、`prompts`、`sampling`、`roots`、`elicitation`、`logging` 等）。
-   - 每个原语下有哪些更细的配置（比如 `tools.listChanged` 表示我会通知工具列表变化；`roots.listChanged` 表示我会通知根目录变化）。
+   - 我支持哪些 MCP 原语:o::o::o:（例如 `tools`、`resources`、`prompts`、`sampling`、`roots`、`elicitation`、`logging` 等）。
+   - 每个原语下有哪些更细的配置（比如 `tools.listChanged` 表示我会通知工具列表变化；`roots.listChanged` 表示我会通知根目录变化）。:o:
 
 **解决的问题**：
 
@@ -1409,9 +1210,7 @@ MCP 把“连接建立”和“能力发现”分离：
 
 ---
 
-## 三、回到你的具体疑问：“是在建立通信的基础上再确定能用什么工具吗？”
-
-**是的，完全正确。**
+### 三：在建立通信的基础上再确定能用什么工具
 
 流程顺序：
 
@@ -1428,7 +1227,7 @@ MCP 把“连接建立”和“能力发现”分离：
 
 ---
 
-## 四、为什么需要两层（能力协商 + 具体列表）？
+#### 四、为什么需要两层（能力协商 + 具体列表）？
 
 | 层次     | 内容                                            | 传输时机         | 作用                                              |
 | -------- | ----------------------------------------------- | ---------------- | ------------------------------------------------- |
@@ -1442,7 +1241,7 @@ MCP 把“连接建立”和“能力发现”分离：
 
 ---
 
-## 五、总结一句话
+### 五、总结一句话
 
 > **MCP 能力协商解决的是“客户端与服务器在建立连接后，如何在不硬编码、不预先约定的情况下，动态发现对方支持哪些高级功能（如工具、资源、提示、采样等），并据此安全地协调后续通信”的问题。它是在底层通信通道之上、具体数据交换之前的一层握手协议，目的是实现解耦、可扩展和安全的互操作。**
 
@@ -1604,13 +1403,13 @@ MCP 标准通知分类
 └─────────────────────────────────────────────────────┘
 ```
 
-## 📌 核心概念：JSON-RPC 通知
+###  JSON-RPC 通知
 
 MCP协议完全遵循 JSON-RPC 2.0 规范，这意味着所有通知本质上都是一个单向消息，由发送方发出，**接收方绝对不需要、也不应该发送任何响应**。通知消息中**不得包含ID字段**，这与请求和响应的格式形成明确区分。
 
 ---
 
-## 📡 标准方法列表
+###  标准方法列表
 
 MCP规范定义了以下标准通知方法：
 
@@ -2136,403 +1935,3 @@ class CachingProxyServer:
         return content
 ```
 
-### 5.3 安全加固清单
-
-```
-□ 传输层安全
-  □ HTTPS/TLS 加密所有远程通信（SSE 和 Streamable HTTP）
-  □ stdio 确认进程启动参数不包含明文密码
-  □ 使用 mTLS 进行 Server 身份认证（生产环境）
-
-□ 访问控制
-  □ 基于 API Key / JWT Token 进行 Client 认证
-  □ 按 session 隔离用户数据（不同的 session_id 看到不同的资源）
-  □ 工具级别权限控制（用户 A 可以调用只读工具，用户 B 可以调用所有工具）
-
-□ 输入校验
-  □ 所有工具参数使用 JSON Schema 验证（框架层自动处理）
-  □ 额外校验：文件路径穿越检查、SQL 注入检查、命令注入检查
-  □ URI 校验：确保 Resource URI 不指向敏感路径
-
-□ 资源限制
-  □ 工具执行超时（默认 30s，可配置）
-  □ 结果大小限制（单次响应 ≤ 10MB）
-  □ 令牌消耗限制（Sampling 时限制 max_tokens）
-  □ 并发调用限制（每个 session 同时最多 N 个 tool call）
-
-□ 审计日志
-  □ 记录所有 tools/call 请求（谁、什么时候、调了什么工具、参数、结果）
-  □ 记录所有 resources/read 请求
-  □ 记录 Sampling 请求（涉及 LLM token 消耗）
-  □ 日志包含 session_id、user_id、timestamp
-```
-
-### 5.4 排障指南
-
-#### 常见问题速查
-
-| 症状 | 可能原因 | 排查命令/方法 |
-|------|----------|--------------|
-| 连接建立失败 | 协议版本不兼容 | 检查 initialize 请求中的 protocolVersion |
-| 工具调用超时 | Server 执行耗时过长 | 检查工具执行日志；设置合理的超时时间 |
-| SSE 连接频繁断开 | 反向代理超时 | 检查 Nginx `proxy_read_timeout`；添加 heartbeat |
-| 资源读取返回空 | URI 格式错误 | 检查 URI scheme 是否正确注册 |
-| 进度通知不显示 | Client 未处理 progress notification | 确认 Client 的 Notification handler 已注册 |
-| 批量请求乱序 | stdio 不支持并发 | 使用 Streamable HTTP 替代 |
-
-#### 调试技巧
-
-```python
-# 1. 开启 MCP 协议日志
-import logging
-logging.getLogger("mcp").setLevel(logging.DEBUG)
-
-# 2. 使用 MCP Inspector 调试（Anthropic 官方工具）
-# npx @anthropic-ai/mcp-inspector <command>
-# 这会启动一个 Web UI，可以交互式测试 MCP Server
-
-# 3. 截获并打印原始 JSON-RPC 消息
-class DebugTransport:
-    def __init__(self, wrapped_transport):
-        self.wrapped = wrapped_transport
-
-    async def send(self, message: dict):
-        print(f"[MCP →] {json.dumps(message, ensure_ascii=False)}")
-        return await self.wrapped.send(message)
-
-    async def receive(self) -> dict:
-        response = await self.wrapped.receive()
-        print(f"[MCP ←] {json.dumps(response, ensure_ascii=False)}")
-        return response
-```
-
----
-
-## 六、常见面试题
-
-### 传输层
-
-**Q1: MCP 支持哪三种传输方式？各自的适用场景是什么？**
-
-<details>
-<summary>参考答案</summary>
-
-| 传输方式 | 适用场景 | 典型部署 |
-|----------|----------|----------|
-| **stdio** | 本地进程间通信 | IDE 插件 ↔ 本地工具 |
-| **SSE** | 需要服务端推送的远程通信 | Web 客户端 ↔ 云端工具 |
-| **Streamable HTTP** | 生产环境高可靠性要求 | SaaS 平台、微服务架构 |
-
-Streamable HTTP 是 2025 年新增的默认传输方式，解决了 SSE 连接不可恢复和 Session 管理复杂的问题。
-
-</details>
-
----
-
-**Q2: Streamable HTTP 相比 SSE 解决了哪些核心问题？**
-
-<details>
-<summary>参考答案</summary>
-
-1. **连接可恢复性**：Streamable HTTP 的每个请求可以走不同的 TCP 连接，SSE 断开后需要完整重建
-2. **Server 连接压力**：Streamable HTTP 无需为每个 Client 维护长连接，适合大规模部署
-3. **负载均衡友好**：无状态请求可被任意路由，SSE 需要 sticky session
-4. **模式灵活性**：支持 Stateless（FaaS 友好）和 Stateful（需要推送时）两种模式
-
-</details>
-
----
-
-### 核心原语
-
-**Q3: MCP 的四大核心原语是什么？各自解决什么问题？**
-
-<details>
-<summary>参考答案</summary>
-
-| 原语 | 解决的问题 | 控制方 | 数据流向 |
-|------|-----------|--------|----------|
-| **Tools** | LLM 需要执行操作（查数据、发邮件） | LLM | Client → Server → Client |
-| **Resources** | LLM 需要读取上下文（文件、数据库） | Client | Server → Client |
-| **Prompts** | 提供标准化的交互模板 | 用户 | Server → Client → LLM |
-| **Sampling** | Server 需要反向请求 LLM 生成内容 | Server | Server → Client → LLM → Client → Server |
-
-</details>
-
----
-
-**Q4: Tools 和 Resources 的本质区别是什么？为什么不能合二为一？**
-
-<details>
-<summary>参考答案</summary>
-
-**本质区别：**
-
-| 维度 | Tools | Resources |
-|------|-------|-----------|
-| 语义 | 执行操作（写） | 读取数据（读） |
-| 幂等性 | 不一定 | 天然幂等 |
-| 订阅 | 不支持 | 支持资源变更订阅 |
-| 安全模型 | 需要权限校验 | 通常可放宽权限 |
-
-**为什么不能合并？**
-
-1. 安全模型不同：Host 可能对"数据库查询"和"数据库修改"配置不同的权限策略
-2. 缓存策略不同：Resource 结果可以缓存，Tool 结果通常不能
-3. 订阅机制：Resource 有独特的订阅能力，Tool 没有这个需求
-
-类比 REST：`GET /users` 和 `POST /users` 虽然操作同一个资源集合，但语义截然不同，适用不同的中间件策略。
-
-</details>
-
----
-
-**Q5: Sampling 是什么？它打破了什么传统模式？有什么安全风险和防护方案？**
-
-<details>
-<summary>参考答案</summary>
-
-**Sampling** 允许 MCP Server 反向请求 LLM 生成内容，打破了传统的 "Client 单向请求 → Server 响应" 模式。
-
-**典型场景：**
-- Server 拿到大段文档，让 LLM 先做摘要再处理
-- Server 需要在处理过程中让 LLM 做判断或推理
-
-**三个维度的安全风险 + 防护：**
-
-**1. 递归 Sampling 攻击**：Server A 触发 Sampling → LLM 调 Server B → Server B 又触发 Sampling → 无限循环。Token 消耗失控。
-- 防护：深度限制（max_depth ≤ 3）+ 调用链指纹去重（同一 fingerprint 出现 > 2 次拒绝）+ 全局 Token 预算（每 session 独立配额）
-
-**2. Token 成本归属**：谁为 Sampling 产生的 LLM Token 买单？
-- 模型 A（Client-pays）：简单但有滥用风险
-- 模型 B（Caller-pays）：按请求来源分摊，公平但实现复杂
-- 模型 C（预算上限 + 超额审批）：预算内自动批准，超额弹用户确认
-
-**3. 提示词注入与数据泄露**：恶意 Server 可能通过 Sampling 构造恶意提示词诱导 LLM，或在请求中泄露敏感数据
-- 防护：Host 审查 Sampling 消息内容 + 限制 max_tokens + 用户确认对话框
-
-**与 Elicitation 的核心区分**：Sampling 是 Server → LLM（消耗 Token），Elicitation 是 Server → 用户（不消耗 Token，始终有 UI）
-
-</details>
-
----
-
-### 能力协商与协议细节
-
-**Q6: 请解释 MCP 的能力协商（Capability Negotiation）机制。**
-
-<details>
-<summary>参考答案</summary>
-
-能力协商是贯穿 MCP 所有交互的核心机制：Client 和 Server 在初始化和运行时声明各自支持的功能，双方按"最小交集"原则确定可用功能集。
-
-**协商流程：**
-1. Client 在 `initialize` 请求中声明 `ClientCapabilities`（如 `roots`、`sampling`）
-2. Server 在 `initialize` 响应中声明 `ServerCapabilities`（如 `tools`、`resources.subscribe`）
-3. 双方在后续交互中需遵守声明——Server 未声明 `subscribe` 则 Client 不应发送订阅请求
-4. 2025 年 3 月版本后支持渐进式能力更新（运行时通过 `capabilities/updated` 通知更新）
-
-</details>
-
----
-
-**Q7: 当一个 tools/call 的业务执行失败时，MCP 如何区分"工具调用失败"和"协议通信失败"？**
-
-<details>
-<summary>参考答案</summary>
-
-这是 MCP 错误处理模型的核心设计：
-
-**工具执行失败（业务层）** → 返回 JSON-RPC Response，`result.isError = true`：
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-        "content": [{"type": "text", "text": "数据库查询失败：连接超时"}],
-        "isError": true
-    }
-}
-```
-
-**协议通信失败（协议层）** → 返回 JSON-RPC Error：
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "error": {
-        "code": -32602,
-        "message": "Invalid params",
-        "data": "缺少必填参数 'city'"
-    }
-}
-```
-
-**为什么这样设计？** LLM 可以理解 `isError: true` 的工具错误并采取补救（换参数重试、告知用户等），但 JSON-RPC Error 表示通信本身出了问题，LLM 无法也不应处理。
-
-</details>
-
----
-
-### 设计理解
-
-**Q8: MCP 的四大设计原则是什么？为什么这么设计？**
-
-<details>
-<summary>参考答案</summary>
-
-1. **Servers 应极容易构建**：降低工具开发门槛，鼓励更多开发者贡献 MCP Server
-2. **Servers 应高度可组合**：不同 Server 可以自由组合，形成更复杂的工具链
-3. **Servers 不应能读取完整对话历史，也不能"窥视"其他 Server**：保护用户隐私和安全隔离
-4. **功能可渐进添加，向后兼容**：Client 和 Server 可以独立升级，新老版本共存
-
-**为什么这么设计？** 这些原则直接回应了传统 AI 工具集成的痛点：
-- 原则①②降低生态建设难度
-- 原则③解决安全和隐私顾虑
-- 原则④保证协议的长期演进能力
-
-</details>
-
----
-
-**Q9: 如果你的 MCP Server 需要处理一个耗时 30 秒的操作，你会如何设计以提供良好的用户体验？**
-
-<details>
-<summary>参考答案</summary>
-
-核心思路：利用 MCP 的**进度通知**和**取消机制**。
-
-1. **接受 progressToken**：工具参数中接受来自 Client 的 `_meta.progressToken`
-2. **分阶段推送进度**：在工具执行的关键节点发送 `notifications/progress`
-3. **支持取消**：监听 `notifications/cancelled`，在每次循环前检查是否被取消
-4. **合理的超时设置**：Server 端设置总超时，避免无限执行
-5. **流式返回中间结果**：如果可以，通过 Streamable HTTP 流式返回部分结果
-
-</details>
-
----
-
-### 版本兼容与性能
-
-**Q10: 如果你的 Server 实现的是 2024-11-05 版本，但 Client 发来了 2025-03-26 的 initialize 请求，你会如何设计兼容策略？**
-
-<details>
-<summary>参考答案</summary>
-
-四个核心策略：
-
-1. **版本协商**：维护兼容性矩阵，Server 声明自己可接受的 Client 版本范围。如果 Client 版本在矩阵内 → 协商到双方最高兼容版本；如果不在 → 返回版本不兼容错误
-2. **Forward-compat（前向兼容）**：JSON 解析时忽略未知字段（JSON 的天生优势）。Client 发来的 `elicitation: {}` 在 2024-11-05 Server 上被静默忽略，不报错
-3. **能力降级**：Server 的能力声明根据协商版本做字段裁剪。如果协商到 2024-11-05，移除 `tools.listChanged`、`tools.support_structured_output`、`completions` 等新版专属字段
-4. **方法拒绝**：Client 请求 `elicitation/create` 等新版方法时，返回 JSON-RPC `-32601 Method Not Found`，并附带友好的错误信息
-
-**关键认知**：JSON-RPC 的 forward-compat 特性让版本兼容的成本远低于 Protobuf/gRPC 等二进制协议——未知字段自动忽略，不需要编译时 Schema 对齐。
-
-</details>
-
----
-
-**Q11: 从性能角度，stdio、SSE 和 Streamable HTTP（Stateless/Stateful）应该如何选型？**
-
-<details>
-<summary>参考答案</summary>
-
-基于统一测试场景（1000 次 tools/list 请求）的量化数据：
-
-| 模式 | Mean 延迟 | P99 延迟 | 吞吐量 | 适用规模 |
-|------|----------|----------|--------|----------|
-| stdio | 0.85ms | 1.8ms | ~1,180/s | 1 Client（本地） |
-| Streamable HTTP Stateful | 1.2ms | 3.5ms | ~830/s | <500 并发 Session |
-| SSE | 1.8ms | 5.0ms | ~560/s | <10,000 并发连接 |
-| Streamable HTTP Stateless (本地) | 4.5ms | 12ms | ~220/s | 无连接数限制 |
-| Streamable HTTP Stateless (远程) | 35ms | 85ms | ~28/s | 取决于网络 |
-
-**选型原则**：
-- 本地开发 → stdio（最低延迟）
-- 内网服务 → Stateful HTTP（复用连接，延迟低 + 规模适中）
-- SaaS 平台 → Stateless HTTP（每次新建连接开销高，但水平扩展无上限）
-- SSE 的瓶颈在单机连接数（FD + Event Loop），超过 10,000 并发建议切到 Stateless HTTP
-
-</details>
-
----
-
-**Q12: Elicitation 是什么？它与 Sampling 有何本质区别？**
-
-<details>
-<summary>参考答案</summary>
-
-**Elicitation** 是 2025-03-26 引入的原语，允许 MCP Server 主动向**用户**提问，通过 `elicitation/create` 方法请求用户填写表单、确认操作或做出选择。
-
-**与 Sampling 的核心区分：**
-
-| 维度 | Sampling | Elicitation |
-|------|----------|-------------|
-| 交互对象 | Server → LLM | Server → 用户 |
-| Token 消耗 | 消耗 LLM Token | 无 Token 消耗 |
-| 用户感知 | 可能不可见 | 始终可见（弹 UI） |
-| 协议方法 | `sampling/createMessage` | `elicitation/create` |
-
-**三种交互模式**：form（表单引导）、confirm（确认操作）、choice（选项选择）
-
-**安全考量**：Elicitation 的主要风险是敏感信息诱导和钓鱼式确认——恶意 Server 可能设计表单诱导用户输入密码或伪造紧急提示诱导确认高危操作。防护依靠 Host 层的表单标签审查和 Server 身份展示。
-
-</details>
-
----
-
-## 附录
-
-### 新增术语速查表
-
-| 术语 | 英文 | 简要说明 |
-|------|------|----------|
-| JSON-RPC | JSON-RPC 2.0 | 轻量级 RPC 协议，JSON 格式，传输无关 |
-| stdio | Standard Input/Output | 标准输入输出，进程间通信方式 |
-| SSE | Server-Sent Events | HTTP 服务端推送技术 |
-| Streamable HTTP | Streamable HTTP | 2025 年新增的默认 MCP 传输方式 |
-| Capability Negotiation | Capability Negotiation | Client/Server 之间的能力协商机制 |
-| Sampling | Sampling | Server 反向请求 LLM 生成内容的能力 |
-| Progress Notification | Progress Notification | 长时间操作的进度通知 |
-| Cancelled Notification | Cancelled Notification | 取消正在进行的操作 |
-| Notification | Notification | 无需回复的单向消息 |
-| Batch Request | Batch Request | JSON-RPC 的批量请求能力 |
-| Stateless / Stateful | Stateless / Stateful | Streamable HTTP 的两种运行模式 |
-| Elicitation | Elicitation | Server 向用户提问的引导模式 |
-
-### 协议方法速查表
-
-| 方法 | 类型 | 方向 | 说明 |
-|------|------|------|------|
-| `initialize` | Request | C → S | 初始化连接 |
-| `initialized` | Notification | C → S | 确认初始化完成 |
-| `ping` | Request | C → S | 心跳检测 |
-| `tools/list` | Request | C → S | 获取工具列表 |
-| `tools/call` | Request | C → S | 调用指定工具 |
-| `resources/list` | Request | C → S | 获取资源列表 |
-| `resources/read` | Request | C → S | 读取指定资源 |
-| `resources/subscribe` | Request | C → S | 订阅资源变更 |
-| `resources/unsubscribe` | Request | C → S | 取消订阅 |
-| `resources/templates/list` | Request | C → S | 获取资源模板列表 |
-| `prompts/list` | Request | C → S | 获取提示词模板列表 |
-| `prompts/get` | Request | C → S | 获取填充后的提示词 |
-| `sampling/createMessage` | Request | S → C | Server 请求 LLM 生成内容 |
-| `elicitation/create` | Request | S → C | Server 请求向用户提问 |
-| `logging/setLevel` | Request | C → S | 设置 Server 日志级别 |
-| `completion/complete` | Request | C → S | 请求自动补全建议 |
-| `notifications/progress` | Notification | S → C | 进度更新 |
-| `notifications/cancelled` | Notification | C → S | 取消操作 |
-| `notifications/resources/updated` | Notification | S → C | 资源内容变更 |
-| `notifications/resources/list_changed` | Notification | S → C | 资源列表变更 |
-| `notifications/tools/list_changed` | Notification | S → C | 工具列表变更 |
-| `notifications/prompts/list_changed` | Notification | S → C | 提示词列表变更 |
-| `notifications/capabilities/updated` | Notification | S → C | 能力声明更新 |
-
-### 推荐阅读
-
-- [MCP 官方规范 - Transport Layer](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/)
-- [MCP 官方规范 - Lifecycle](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle/)
-- [Streamable HTTP 设计文档](https://modelcontextprotocol.io/specification/streamable-http)
-- [MCP Inspector 调试工具](https://github.com/modelcontextprotocol/inspector)
